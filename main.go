@@ -61,7 +61,6 @@ func main() {
 			cfg.NoSession = true
 			ag = agent.New(cfg)
 			ag.SetThinking(agent.ThinkingLevel(cfg.ThinkingLevel))
-			ag.SetThinking(agent.ThinkingLevel(cfg.ThinkingLevel))
 		case "--name", "-n":
 			i++
 			if i < len(args) {
@@ -150,7 +149,7 @@ func runInteractive() {
 		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
 	fmt.Printf("%s║%s  %s/session /save  /load  /resume%s      %s║%s\n",
 		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
-	fmt.Printf("%s║%s  %s/mode   /help      /quit%s            %s║%s\n",
+	fmt.Printf("%s║%s  %s/mode   /reload  /help  /quit%s        %s║%s\n",
 		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
 	fmt.Printf("%s╚══════════════════════════════════════════╝%s\n", ANSICyan, ANSIReset)
 
@@ -206,6 +205,7 @@ func showHelp() {
 	fmt.Printf("  %s/self%s             Self-iterate & rebuild PiGo\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/repair <desc>%s    Auto-repair a bug\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/mode%s             Show current mode, model, thinking\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/reload%s           Reload context files, tools, and config\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/session%s          Show current session info\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/save [name]%s      Save and name current session\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/load <id>%s        Load a session by ID prefix\n", ANSIYellow, ANSIReset)
@@ -264,6 +264,14 @@ func dispatch(input string) {
 			ANSIGray, ANSIReset, mode,
 			ANSIGray, ANSIReset, model,
 			ANSIGray, ANSIReset, thinking)
+
+	case input == "/reload":
+		summary, err := ag.Reload()
+		if err != nil {
+			fmt.Printf("%s✗%s %v\n", ANSIRed, ANSIReset, err)
+		} else {
+			fmt.Printf("%s✓%s %s\n", ANSIGreen, ANSIReset, summary)
+		}
 
 	// ─── Session Commands ─────────────────────────────────────
 	case input == "/session":

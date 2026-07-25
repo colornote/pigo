@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -46,6 +47,9 @@ func New(cfg *config.Config) *Agent {
 	reg.Register(&tools.WriteTool{})
 	reg.Register(&tools.EditTool{})
 	reg.Register(&tools.BashTool{})
+	reg.Register(&tools.GrepTool{})
+	reg.Register(&tools.FindTool{})
+	reg.Register(&tools.LSTool{})
 
 	// Session manager rooted at ~/.pigo/sessions
 	home, _ := os.UserHomeDir()
@@ -129,13 +133,22 @@ func (a *Agent) ResumeSession(s *session.Session) error {
 				},
 			})
 		case "assistant":
-			// Try to parse structured content; fallback to plain text
-			a.messages = append(a.messages, llm.Message{
-				Role: "assistant",
-				Content: []llm.TextContent{
-					{Type: "text", Text: entry.Content},
-				},
-			})
+			// Try to parse structured content (JSON array of text/tool_use blocks);
+			// fallback to plain text for legacy entries.
+			var structured []interface{}
+			if err := json.Unmarshal([]byte(entry.Content), &structured); err == nil {
+				a.messages = append(a.messages, llm.Message{
+					Role:    "assistant",
+					Content: structured,
+				})
+			} else {
+				a.messages = append(a.messages, llm.Message{
+					Role: "assistant",
+					Content: []llm.TextContent{
+						{Type: "text", Text: entry.Content},
+					},
+				})
+			}
 		case "tool":
 			// Tool results are stored as user messages in Anthropic format
 			if entry.ToolUseID != "" {
@@ -355,7 +368,11 @@ func (a *Agent) runStandardLoop() (string, error) {
 		}
 
 		a.messages = append(a.messages, llm.Message{Role: "assistant", Content: assistantContent})
-		a.saveEntry("assistant", assistantText, "")
+
+		// Persist full structured content (text + tool_use blocks) as JSON
+		// so tool_use_id references survive session resume.
+		assistantJSON, _ := json.Marshal(assistantContent)
+		a.saveEntry("assistant", string(assistantJSON), "")
 
 		if len(toolUses) == 0 {
 			if assistantText != "" {
@@ -595,6 +612,90 @@ func (a *Agent) Rebuild() error {
 func (a *Agent) RunCommand(prompt string) error {
 	_, err := a.Run(prompt)
 	return err
+}
+
+// ─── Reload ─────────────────────────────────────────────────────
+
+// Reload re-reads context files (AGENTS.md, CLAUDE.md, docs/) and re-registers tools.
+// It keeps the current session, message history, model, and thinking level intact.
+// Returns a summary of what was reloaded.
+func (a *Agent) Reload() (string, error) {
+	home, _ := os.UserHomeDir()
+	var reloaded []string
+
+	// 1. Re-read AGENTS.md / CLAUDE.md context files
+	newCtx := loadContextFiles(home)
+	if newCtx != a.cfg.SystemPrompt {
+		a.cfg.SystemPrompt = newCtx
+		reloaded = append(reloaded, "context files (AGENTS.md/CLAUDE.md/docs)")
+	}
+
+	// 2. Re-register tools (in case new tools were added)
+	a.registry = tools.NewRegistry()
+	a.registry.Register(&tools.ReadTool{})
+	a.registry.Register(&tools.WriteTool{})
+	a.registry.Register(&tools.EditTool{})
+	a.registry.Register(&tools.BashTool{})
+	a.registry.Register(&tools.GrepTool{})
+	a.registry.Register(&tools.FindTool{})
+	a.registry.Register(&tools.LSTool{})
+	reloaded = append(reloaded, "tools")
+
+	// 3. Re-read config (API key might have changed in .env)
+	newAPIKey := lookupKeyFromEnv()
+	if newAPIKey != "" && newAPIKey != a.cfg.APIKey {
+		a.cfg.APIKey = newAPIKey
+		a.client = llm.New(a.cfg.APIKey, a.cfg.BaseURL, a.cfg.Model)
+		a.deepseekClient = llm.NewDeepSeekClient(a.cfg.APIKey, "https://api.deepseek.com")
+		reloaded = append(reloaded, "API credentials")
+	}
+
+	if len(reloaded) == 0 {
+		return "nothing changed — already up to date", nil
+	}
+
+	return strings.Join(reloaded, ", ") + " — reloaded", nil
+}
+
+// loadContextFiles reads AGENTS.md, CLAUDE.md, and project docs.
+func loadContextFiles(home string) string {
+	var parts []string
+
+	// Global AGENTS.md
+	if home != "" {
+		if data, err := os.ReadFile(filepath.Join(home, ".pigo", "AGENTS.md")); err == nil {
+			parts = append(parts, string(data))
+		}
+	}
+
+	// Project AGENTS.md / CLAUDE.md
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if data, err := os.ReadFile(name); err == nil {
+			parts = append(parts, string(data))
+			break // only one project-level context file
+		}
+	}
+
+	// Docs reference
+	if _, err := os.Stat("docs"); err == nil {
+		parts = append(parts, "Check `docs/` for pi design reference & feature specs.")
+	}
+
+	if len(parts) == 0 {
+		return "You are PiGo — a coding agent in Go.\nTools: read, write, edit, bash.\nBe concise. Use edit for changes.\n\n## Docs\nCheck `docs/` for pi design reference & feature specs.\n"
+	}
+
+	return strings.Join(parts, "\n\n")
+}
+
+// lookupKeyFromEnv reads API key from environment variables.
+func lookupKeyFromEnv() string {
+	for _, k := range []string{"DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "PIGO_API_KEY"} {
+		if v := os.Getenv(k); v != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 type Turn struct {
