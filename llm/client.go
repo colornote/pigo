@@ -67,6 +67,7 @@ type StreamEvent struct {
 	Index        int           `json:"index"`
 	Delta        *StreamDelta  `json:"delta,omitempty"`
 	ContentBlock *ContentBlock `json:"content_block,omitempty"`
+	Usage        *Usage        `json:"usage,omitempty"`
 }
 
 type StreamDelta struct {
@@ -77,10 +78,11 @@ type StreamDelta struct {
 }
 
 type Client struct {
-	apiKey  string
-	baseURL string
-	model   string
-	http    *http.Client
+	apiKey    string
+	baseURL   string
+	model     string
+	http      *http.Client
+	TotalUsage Usage // accumulated across requests
 }
 
 func New(apiKey, baseURL, model string) *Client {
@@ -230,10 +232,28 @@ func (c *Client) SendStream(req *Request, onText func(string), onToolStart func(
 					result.StopReason = event.Delta.StopReason
 				}
 			}
+			// Some APIs put usage here
+			if event.Usage != nil {
+				c.TotalUsage = addUsage(c.TotalUsage, *event.Usage)
+			}
 		case "message_stop":
-			// done
+			// Capture usage from message_stop event
+			if event.Usage != nil {
+				c.TotalUsage = addUsage(c.TotalUsage, *event.Usage)
+			}
 		}
 	}
 
 	return &result, scanner.Err()
+}
+
+// addUsage accumulates usage
+func addUsage(total, delta Usage) Usage {
+	total.InputTokens += delta.InputTokens
+	total.OutputTokens += delta.OutputTokens
+	// Cache info from DeepSeek's anthropic-compatible API
+	total.CacheHitTokens += delta.CacheHitTokens
+	total.CacheMissTokens += delta.CacheMissTokens
+	total.CacheWriteTokens += delta.CacheWriteTokens
+	return total
 }

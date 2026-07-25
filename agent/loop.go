@@ -67,9 +67,97 @@ func (a *Agent) Thinking() ThinkingLevel { return a.thinking }
 func (a *Agent) SwitchModel(name string) {
 	a.cfg.Model = name
 	a.client = llm.New(a.cfg.APIKey, a.cfg.BaseURL, name)
+	// Reset usage on model switch
+	a.client.TotalUsage = llm.Usage{}
+	a.deepseekClient.TotalUsage = llm.Usage{}
 }
 
 func (a *Agent) Model() string { return a.cfg.Model }
+
+// TotalUsage returns combined usage from both clients
+func (a *Agent) TotalUsage() llm.Usage {
+	return llm.Usage{
+		InputTokens:      a.client.TotalUsage.InputTokens + a.deepseekClient.TotalUsage.InputTokens,
+		OutputTokens:     a.client.TotalUsage.OutputTokens + a.deepseekClient.TotalUsage.OutputTokens,
+		CacheHitTokens:   a.client.TotalUsage.CacheHitTokens + a.deepseekClient.TotalUsage.CacheHitTokens,
+		CacheMissTokens:  a.client.TotalUsage.CacheMissTokens + a.deepseekClient.TotalUsage.CacheMissTokens,
+		CacheWriteTokens: a.client.TotalUsage.CacheWriteTokens + a.deepseekClient.TotalUsage.CacheWriteTokens,
+	}
+}
+
+// Footer prints the status footer line
+func (a *Agent) Footer() {
+	usage := a.TotalUsage()
+	model := a.Model()
+	thinking := a.Thinking()
+	ctxWindow := llm.GetContextWindow(model)
+	pct := 0.0
+	if ctxWindow > 0 {
+		pct = float64(usage.InputTokens) / float64(ctxWindow) * 100
+	}
+	cost := usage.CostUSD(model)
+
+	// Model display name (prettify)
+	displayModel := model
+	if strings.Contains(model, "[1m]") {
+		displayModel = "V4 Pro 1M"
+	} else if strings.Contains(model, "flash") {
+		displayModel = "V4 Flash"
+	} else if strings.Contains(model, "chat") {
+		displayModel = "Chat"
+	} else if strings.Contains(model, "reasoner") {
+		displayModel = "Reasoner"
+	}
+
+	// Short dir
+	dir := a.cfg.WorkDir
+	if len(dir) > 24 {
+		dir = "…" + dir[len(dir)-23:]
+	}
+
+	fmt.Fprintf(os.Stderr, "\n%s── %sDeepSeek %s%s | %sthink:%s%s | %s%s%s | %s◫ %s%s/%dM %s(%.1f%%)%s",
+		ANSIGray,
+		ANSIBold, displayModel, ANSIReset,
+		ANSIGray, ANSIReset, thinking,
+		ANSIGray, ANSIReset, dir,
+		ANSIGray, ANSIReset,
+		formatTokens(usage.InputTokens),
+		ctxWindow/1000,
+		ANSIGray, pct, ANSIReset,
+	)
+
+	// Cache info
+	cacheTotal := usage.CacheHitTokens + usage.CacheWriteTokens
+	if cacheTotal > 0 {
+		fmt.Fprintf(os.Stderr, " %s|%s cache: %s", ANSIGray, ANSIReset, formatBytes(cacheTotal*4))
+	}
+
+	// Cost
+	fmt.Fprintf(os.Stderr, " %s|%s %s$%.2f%s",
+		ANSIGray, ANSIReset,
+		ANSIYellow, cost, ANSIReset,
+	)
+}
+
+func formatTokens(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	if n < 1000000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(n)/1000000)
+}
+
+func formatBytes(n int) string {
+	if n < 1024 {
+		return fmt.Sprintf("%dB", n)
+	}
+	if n < 1024*1024 {
+		return fmt.Sprintf("%dK", n/1024)
+	}
+	return fmt.Sprintf("%dM", n/(1024*1024))
+}
 
 // isReasonerModel checks if the current model supports native CoT/reasoning
 func (a *Agent) isReasonerModel() bool {
@@ -189,6 +277,7 @@ func (a *Agent) Run(prompt string) (string, error) {
 			if assistantText != "" {
 				fmt.Println()
 			}
+			a.Footer()
 			return assistantText, nil
 		}
 
@@ -276,6 +365,7 @@ func (a *Agent) runCoT(prompt string) (string, error) {
 	}
 	fmt.Println()
 
+	a.Footer()
 	return finalContent, nil
 }
 

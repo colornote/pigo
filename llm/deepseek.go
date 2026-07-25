@@ -49,13 +49,15 @@ type DSStreamChunk struct {
 	Created int64      `json:"created"`
 	Model   string     `json:"model"`
 	Choices []DSChoice `json:"choices"`
+	Usage   *Usage     `json:"usage,omitempty"`
 }
 
 // DeepSeekClient uses the native DeepSeek API (supports reasoning_content / CoT)
 type DeepSeekClient struct {
-	apiKey  string
-	baseURL string // e.g. https://api.deepseek.com
-	http    *http.Client
+	apiKey     string
+	baseURL    string // e.g. https://api.deepseek.com
+	http       *http.Client
+	TotalUsage Usage // accumulated across requests
 }
 
 func NewDeepSeekClient(apiKey, baseURL string) *DeepSeekClient {
@@ -132,6 +134,15 @@ func (c *DeepSeekClient) SendStream(req *DSRequest, onReasoning CoTCallback, onC
 					onContent(choice.Delta.Content)
 				}
 			}
+		}
+
+		// Capture usage from the final chunk
+		if chunk.Usage != nil {
+			c.TotalUsage.InputTokens += chunk.Usage.InputTokens
+			c.TotalUsage.OutputTokens += chunk.Usage.OutputTokens
+			c.TotalUsage.CacheHitTokens += chunk.Usage.CacheHitTokens
+			c.TotalUsage.CacheMissTokens += chunk.Usage.CacheMissTokens
+			c.TotalUsage.CacheWriteTokens += chunk.Usage.CacheWriteTokens
 		}
 	}
 
