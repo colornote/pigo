@@ -1,9 +1,15 @@
 # PiGo — pi in Go
 
-## pi 参考文档
+## pi 参考文档（必读）
 
-`docs/pi-readme.md` — pi 完整文档，包含所有核心功能设计。
-自迭代时务必参考此文档，逐步对齐 pi 的功能。
+自迭代时务必先查阅 `docs/` 中的参考文档：
+
+| 文档 | 内容 |
+|------|------|
+| `docs/pi-readme.md` | pi 完整功能文档 (707 行)，包含所有 CLI 选项、模型选择、工具系统、权限系统、插件、MCP 等 |
+| `docs/pi-design.md` | PiGo 设计蓝图，功能对齐清单，架构概览 |
+
+遇到 pi 功能相关问题时，先 `read docs/pi-readme.md` 查找对应章节。
 
 ## 架构
 
@@ -12,10 +18,13 @@ pigo/
 ├── main.go              # CLI / 命令分发
 ├── config/config.go     # 配置 + .env 加载
 ├── llm/client.go        # DeepSeek API (Anthropic 兼容)
+├── llm/deepseek.go      # DeepSeek 原生 API (CoT/推理)
+├── llm/usage.go         # Token 用量 & 定价
 ├── tools/tools.go       # read / write / edit / bash
-├── agent/loop.go        # 核心循环
-├── agent/modes.go       # 模式系统 / 模型注册
+├── agent/loop.go        # 核心循环 + Footer
+├── agent/modes.go       # 模式系统 / 模型注册 / 提示词
 ├── docs/pi-readme.md    # pi 完整文档 (参考)
+├── docs/pi-design.md    # PiGo 设计蓝图 (参考)
 └── pigo                 # 二进制
 ```
 
@@ -28,26 +37,6 @@ pigo/
 | `/thinking <lvl>` | off/low/medium/high/max |
 | `/mode` | 显示当前状态 |
 | `/self` | 自迭代改进 |
-| `/repair <desc>` | 自动修复 bug |
+| `/repair <desc>` | 自动修复 |
 | `/help` | 帮助 |
 | `/quit` | 退出 |
-
-## 三种模式
-
-| 模式 | 触发 | 提示词 |
-|------|------|------|
-| Normal | 默认 | 编码助手 |
-| Self-Iterate | `/self` | 读源码→改进→go build |
-| Auto-Repair | `/repair` | 诊断→修复→重建 |
-
-## .env 配置
-
-```bash
-DEEPSEEK_API_KEY=sk-xxx
-PIGO_MODEL=deepseek-v4-flash
-PIGO_THINKING=medium
-PIGO_BASE_URL=https://api.deepseek.com/anthropic
-PIGO_MAX_TURNS=50
-```
-
-加载顺序: shell 环境 → `~/.pigo/.env` → `./.env`（后者覆盖前者）
