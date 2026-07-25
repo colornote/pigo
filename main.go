@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"pigo/agent"
 	"pigo/config"
 	"sort"
@@ -149,41 +150,35 @@ func runInteractive() {
 		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
 	fmt.Printf("%s║%s  %s/session /save  /load  /resume%s      %s║%s\n",
 		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
-	fmt.Printf("%s║%s  %s/mode   /reload  /help  /quit%s        %s║%s\n",
+	fmt.Printf("%s║%s  %s/mode   /multiline  /reload  /quit%s  %s║%s\n",
 		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
 	fmt.Printf("%s╚══════════════════════════════════════════╝%s\n", ANSICyan, ANSIReset)
 
 	// Show footer on startup
 	ag.Footer()
 
+	// Multi-line hint
+	fmt.Printf("\n%s  ✎ \\ → 续行  │  \\e → 编辑器  │  ``` → 代码块  │  /multiline → 全屏编辑%s\n",
+		ANSIGray, ANSIReset)
+
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		fmt.Printf("\n%s>%s ", ANSIGreen, ANSIReset)
+		fmt.Printf("\n%s▸%s ", ANSIGreen, ANSIReset)
 		if !scanner.Scan() {
 			goodbye()
 			break
 		}
 		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
 
-		// Multi-line input: if line ends with \, continue reading
-		if strings.HasSuffix(strings.TrimSpace(line), "\\") {
-			// Strip trailing \ and continue accumulating
-			input := strings.TrimSuffix(strings.TrimSpace(line), "\\")
-			for {
-				fmt.Printf("%s…%s ", ANSIGray, ANSIReset)
-				if !scanner.Scan() {
-					goodbye()
-					os.Exit(0)
-				}
-				next := scanner.Text()
-				if strings.HasSuffix(strings.TrimSpace(next), "\\") {
-					input += "\n" + strings.TrimSuffix(strings.TrimSpace(next), "\\")
-					continue
-				}
-				input += "\n" + next
-				break
-			}
-			input = strings.TrimSpace(input)
+		// Empty line — skip
+		if trimmed == "" {
+			continue
+		}
+
+		// ── Triple-backtick block mode ──
+		if trimmed == "```" {
+			input := readBacktickBlock(scanner)
 			if input == "" {
 				continue
 			}
@@ -191,12 +186,180 @@ func runInteractive() {
 			continue
 		}
 
-		input := strings.TrimSpace(line)
-		if input == "" {
+		// ── \e suffix: open editor ──
+		if strings.HasSuffix(trimmed, "\\e") {
+			prefix := strings.TrimSuffix(trimmed, "\\e")
+			prefix = strings.TrimSpace(prefix)
+			input := openEditor(prefix)
+			if input == "" {
+				continue
+			}
+			dispatch(input)
 			continue
 		}
-		dispatch(input)
+
+		// ── \ continuation: line-numbered multi-line ──
+		if strings.HasSuffix(trimmed, "\\") {
+			input := readContinuation(scanner, strings.TrimSuffix(trimmed, "\\"))
+			if input == "" {
+				continue
+			}
+			dispatch(input)
+			continue
+		}
+
+		// ── Normal single-line ──
+		dispatch(trimmed)
 	}
+}
+
+// readContinuation reads multi-line input with \ line continuations.
+// First line already had its trailing \ stripped.
+func readContinuation(scanner *bufio.Scanner, firstLine string) string {
+	var lines []string
+	lines = append(lines, strings.TrimSpace(firstLine))
+	lineNo := 2
+
+	for {
+		fmt.Printf("%s%2d│%s ", ANSIGray, lineNo, ANSIReset)
+		if !scanner.Scan() {
+			goodbye()
+			os.Exit(0)
+		}
+		next := scanner.Text()
+		trimmed := strings.TrimSpace(next)
+
+		// Empty line in continuation: end the block
+		if trimmed == "" {
+			break
+		}
+
+		// \e mid-block: open editor with accumulated lines
+		if strings.HasSuffix(trimmed, "\\e") {
+			prefix := strings.TrimSuffix(trimmed, "\\e")
+			if strings.TrimSpace(prefix) != "" {
+				lines = append(lines, strings.TrimSpace(prefix))
+			}
+			accumulated := strings.Join(lines, "\n")
+			result := openEditor(accumulated)
+			if result != "" {
+				return result
+			}
+			// If editor returned empty (user cancelled), keep going
+			fmt.Printf("%s  (继续输入，空行结束)%s\n", ANSIGray, ANSIReset)
+			continue
+		}
+
+		if strings.HasSuffix(trimmed, "\\") {
+			lines = append(lines, strings.TrimSuffix(trimmed, "\\"))
+			lineNo++
+			continue
+		}
+		lines = append(lines, next)
+		break
+	}
+
+	if len(lines) == 1 && lines[0] == "" {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+// readBacktickBlock reads a triple-backtick code block.
+// The opening ``` has already been consumed.
+func readBacktickBlock(scanner *bufio.Scanner) string {
+	fmt.Printf("%s``` 代码块模式 — 再输入 ``` 结束%s\n", ANSIYellow, ANSIReset)
+	var lines []string
+	lineNo := 1
+
+	for {
+		fmt.Printf("%s%2d│%s ", ANSIGray, lineNo, ANSIReset)
+		if !scanner.Scan() {
+			goodbye()
+			os.Exit(0)
+		}
+		next := scanner.Text()
+		trimmed := strings.TrimSpace(next)
+
+		if trimmed == "```" {
+			if len(lines) == 0 {
+				return ""
+			}
+			result := strings.Join(lines, "\n")
+			fmt.Printf("%s✓ 代码块 (%d 行)%s\n", ANSIGreen, len(lines), ANSIReset)
+			return result
+		}
+
+		// \e mid-block: open editor with accumulated lines
+		if strings.HasSuffix(trimmed, "\\e") {
+			prefix := strings.TrimSuffix(trimmed, "\\e")
+			if strings.TrimSpace(prefix) != "" {
+				lines = append(lines, strings.TrimSpace(prefix))
+			}
+			accumulated := strings.Join(lines, "\n")
+			result := openEditor(accumulated)
+			if result != "" {
+				return result
+			}
+			fmt.Printf("%s  (继续输入代码块，``` 结束)%s\n", ANSIGray, ANSIReset)
+			continue
+		}
+
+		lines = append(lines, next)
+		lineNo++
+	}
+}
+
+// openEditor opens the user's preferred editor for multi-line input.
+// seed is pre-filled content (may be empty).
+func openEditor(seed string) string {
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "nano"
+	}
+
+	tmpFile, err := os.CreateTemp("", "pigo-input-*.md")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s✗ 无法创建临时文件: %v%s\n", ANSIRed, err, ANSIReset)
+		return ""
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if seed != "" {
+		tmpFile.WriteString(seed)
+	}
+	tmpFile.Close()
+
+	fmt.Printf("%s📝 打开编辑器: %s %s%s\n", ANSIYellow, editor, tmpPath, ANSIReset)
+
+	cmd := exec.Command(editor, tmpPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s✗ 编辑器退出异常: %v%s\n", ANSIRed, err, ANSIReset)
+		return ""
+	}
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s✗ 无法读取编辑内容: %v%s\n", ANSIRed, err, ANSIReset)
+		return ""
+	}
+
+	content := strings.TrimSpace(string(data))
+	if content == "" || content == seed {
+		return ""
+	}
+
+	lines := strings.Count(content, "\n") + 1
+	fmt.Printf("%s✓ 已读取 %d 行%s\n", ANSIGreen, lines, ANSIReset)
+	return content
 }
 
 func goodbye() {
@@ -238,12 +401,18 @@ func showHelp() {
 	fmt.Printf("  %s/autorepair [on|off]%s Toggle auto-repair on error\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/mode%s             Show current mode, model, thinking\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/reload%s           Reload context files, tools, and config\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/multiline%s        Open editor for multi-line input\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/session%s          Show current session info\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/save [name]%s      Save and name current session\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/load <id>%s        Load a session by ID prefix\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/resume%s           Browse and pick a session to resume\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/help%s             Show this help\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/quit%s             Exit\n", ANSIYellow, ANSIReset)
+	fmt.Printf("\n%sMulti-line Input:%s\n", ANSICyan, ANSIReset)
+	fmt.Printf("  %s\\%s at end of line       Continue on next line\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s\\e%s at end of line      Open editor with current content\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s```%s on its own line    Start code block (``` to end)\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/multiline%s            Open empty editor for input\n", ANSIYellow, ANSIReset)
 	fmt.Printf("\n%sExamples:%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("  pigo                           Interactive mode\n")
 	fmt.Printf("  pigo -c                        Continue last session\n")
@@ -320,6 +489,14 @@ func dispatch(input string) {
 			fmt.Printf("%s✗%s %v\n", ANSIRed, ANSIReset, err)
 		} else {
 			fmt.Printf("%s✓%s %s\n", ANSIGreen, ANSIReset, summary)
+		}
+
+	case input == "/multiline":
+		result := openEditor("")
+		if result == "" {
+			fmt.Printf("%s  已取消%s\n", ANSIGray, ANSIReset)
+		} else {
+			dispatch(result)
 		}
 
 	// ─── Session Commands ─────────────────────────────────────
