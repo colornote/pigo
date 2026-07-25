@@ -115,21 +115,25 @@ func (a *Agent) Footer() {
 		dir = "…" + dir[len(dir)-23:]
 	}
 
-	fmt.Fprintf(os.Stderr, "\n%s── %sDeepSeek %s%s | %sthink:%s%s | %s%s%s | %s◫ %s%s/%dM %s(%.1f%%)%s",
-		ANSIGray,
+	// Separator + footer
+	fmt.Fprint(os.Stderr, "\n")
+	fmt.Fprintf(os.Stderr, "%s%s%s\n", ANSIGray, strings.Repeat("─", 60), ANSIReset)
+
+	// Format: DeepSeek V4 Pro | think:max | dir workspace | ◫ 216k/1.0M (21.6%) AC | cache in: 21M | $0.24
+	fmt.Fprintf(os.Stderr, "%sDeepSeek %s%s | %sthink:%s%s | %s%s%s | %s◫ %s%s/%s %s(%.1f%%) AC%s",
 		ANSIBold, displayModel, ANSIReset,
 		ANSIGray, ANSIReset, thinking,
 		ANSIGray, ANSIReset, dir,
 		ANSIGray, ANSIReset,
 		formatTokens(usage.InputTokens),
-		ctxWindow/1000,
+		formatTokens(ctxWindow),
 		ANSIGray, pct, ANSIReset,
 	)
 
 	// Cache info
 	cacheTotal := usage.CacheHitTokens + usage.CacheWriteTokens
 	if cacheTotal > 0 {
-		fmt.Fprintf(os.Stderr, " %s|%s cache: %s", ANSIGray, ANSIReset, formatBytes(cacheTotal*4))
+		fmt.Fprintf(os.Stderr, " %s|%s cache in: %s", ANSIGray, ANSIReset, formatBytes(cacheTotal*4))
 	}
 
 	// Cost
@@ -143,10 +147,16 @@ func formatTokens(n int) string {
 	if n < 1000 {
 		return fmt.Sprintf("%d", n)
 	}
-	if n < 1000000 {
+	if n < 10000 {
 		return fmt.Sprintf("%.1fk", float64(n)/1000)
 	}
-	return fmt.Sprintf("%.1fM", float64(n)/1000000)
+	if n < 1000000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	if n < 10_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	return fmt.Sprintf("%dM", n/1_000_000)
 }
 
 func formatBytes(n int) string {
