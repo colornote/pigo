@@ -2,17 +2,29 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"pigo/agent"
 	"pigo/config"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
+
+	"golang.org/x/term"
 )
 
 var ag *agent.Agent
 var startupCommandLine string
+
+// ESC interrupt support
+var (
+	escCancel context.CancelFunc
+	escDone  chan struct{}
+)
 
 // Local aliases for brevity (imported from agent package)
 const (
@@ -33,6 +45,15 @@ func main() {
 	if cfg.WorkDir == "" {
 		cfg.WorkDir, _ = os.Getwd()
 	}
+
+	// Handle Ctrl+C gracefully — auto-save session before exit
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		goodbye()
+		os.Exit(0)
+	}()
 
 	ag = agent.New(cfg)
 	ag.SetThinking(agent.ThinkingLevel(cfg.ThinkingLevel))
@@ -158,7 +179,7 @@ func runInteractive() {
 	ag.Footer()
 
 	// Multi-line hint
-	fmt.Printf("\n%s  ✎ \\ → 续行  │  \\e → 编辑器  │  ``` → 代码块  │  /multiline → 全屏编辑%s\n",
+	fmt.Printf("\n%s  ESC → 打断+追加提示  │  \\ → 续行  │  \\e → 编辑器  │  ``` → 代码块  │  /multiline → 全屏编辑%s\n",
 		ANSIGray, ANSIReset)
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -364,6 +385,8 @@ func openEditor(seed string) string {
 
 func goodbye() {
 	if ag != nil && !ag.IsEphemeral() {
+		// Auto-save session before exit
+		ag.SaveSession("")
 		s := ag.Session()
 		if s != nil {
 			shortID := s.ID
@@ -419,6 +442,132 @@ func showHelp() {
 	fmt.Printf("  pigo -r                        Browse old sessions\n")
 	fmt.Printf("  pigo --no-session \"query\"      Ephemeral one-shot\n")
 	fmt.Printf("  pigo --session abc123 \"query\"  Resume specific session\n")
+}
+
+// ─── ESC Interrupt Support ─────────────────────────────────────
+
+// startESCListener reads stdin byte-by-byte while in raw mode.
+// On ESC or Ctrl+C, it cancels the context to interrupt the API call.
+func startESCListener(cancel context.CancelFunc) {
+	var buf [1]byte
+	for {
+		select {
+		case <-escDone:
+			return
+		default:
+		}
+		// Set short deadline so we can check escDone periodically
+		os.Stdin.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, err := os.Stdin.Read(buf[:])
+		if err != nil {
+			// Timeout or error — loop back to check escDone
+			continue
+		}
+		if n > 0 && (buf[0] == 0x1b || buf[0] == 0x03) {
+			cancel()
+			return
+		}
+	}
+}
+
+// runWithESC wraps an agent API call with ESC interrupt support.
+// Puts terminal in raw mode, listens for ESC/Ctrl+C, restores on return.
+// If cancelled, prompts the user for a follow-up instruction.
+func runWithESC(input string) {
+	ctx, cancel := context.WithCancel(context.Background())
+	escCancel = cancel
+	escDone = make(chan struct{})
+
+	// Switch to raw mode for ESC detection
+	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+	if rawErr == nil {
+		go startESCListener(cancel)
+	}
+
+	result, err := ag.Run(ctx, input)
+
+	// Signal ESC listener to stop, then restore terminal
+	if rawErr == nil {
+		close(escDone)
+		term.Restore(int(os.Stdin.Fd()), oldState)
+	}
+
+	if err != nil {
+		if err == context.Canceled {
+			fmt.Fprintf(os.Stderr, "\n%s⏎ 打断%s — 追加提示词 (回车跳过): %s", ANSIYellow, ANSIReset, ANSIGray)
+			// Read follow-up input in cooked mode
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				followUp := strings.TrimSpace(scanner.Text())
+				if followUp != "" {
+					fmt.Fprintf(os.Stderr, "%s", ANSIReset)
+					fmt.Printf("\n%s▸%s %s\n", ANSIGreen, ANSIReset, followUp)
+					// Re-run with follow-up appended as steering message
+					runWithESC(input + "\n\n[用户追加]" + followUp)
+					return
+				}
+			}
+			fmt.Fprintf(os.Stderr, "%s", ANSIReset)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n%s✗ %v%s\n", ANSIRed, err, ANSIReset)
+			handleRunError(err)
+		}
+		return
+	}
+
+	_ = result
+}
+
+func runSelf() {
+	ctx, cancel := context.WithCancel(context.Background())
+	escCancel = cancel
+	escDone = make(chan struct{})
+
+	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+	if rawErr == nil {
+		go startESCListener(cancel)
+	}
+
+	if err := ag.SelfIterate(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError:%s %v\n", ANSIRed, ANSIReset, err)
+	}
+
+	if rawErr == nil {
+		close(escDone)
+		term.Restore(int(os.Stdin.Fd()), oldState)
+	}
+
+	fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
+	if err := ag.Rebuild(); err != nil {
+		fmt.Fprintf(os.Stderr, "%sRebuild failed:%s %v\n", ANSIRed, ANSIReset, err)
+	} else {
+		fmt.Printf("%s✓ Rebuilt!%s Restart to use new version.\n", ANSIGreen, ANSIReset)
+	}
+}
+
+func runRepair(desc string) {
+	ctx, cancel := context.WithCancel(context.Background())
+	escCancel = cancel
+	escDone = make(chan struct{})
+
+	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+	if rawErr == nil {
+		go startESCListener(cancel)
+	}
+
+	if err := ag.AutoRepair(ctx, desc); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError:%s %v\n", ANSIRed, ANSIReset, err)
+	}
+
+	if rawErr == nil {
+		close(escDone)
+		term.Restore(int(os.Stdin.Fd()), oldState)
+	}
+
+	fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
+	if err := ag.Rebuild(); err != nil {
+		fmt.Fprintf(os.Stderr, "%sRebuild failed:%s %v\n", ANSIRed, ANSIReset, err)
+	}
 }
 
 func dispatch(input string) {
@@ -535,35 +684,17 @@ func dispatch(input string) {
 		handleResume()
 
 	case input == "/self":
-		if err := ag.SelfIterate(); err != nil {
-			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", ANSIRed, ANSIReset, err)
-		}
-		fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
-		if err := ag.Rebuild(); err != nil {
-			fmt.Fprintf(os.Stderr, "%sRebuild failed:%s %v\n", ANSIRed, ANSIReset, err)
-		} else {
-			fmt.Printf("%s✓ Rebuilt!%s Restart to use new version.\n", ANSIGreen, ANSIReset)
-		}
+		runSelf()
 
 	case strings.HasPrefix(input, "/repair"):
 		desc := strings.TrimSpace(strings.TrimPrefix(input, "/repair "))
 		if desc == "" {
 			desc = "fix known issues"
 		}
-		if err := ag.AutoRepair(desc); err != nil {
-			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", ANSIRed, ANSIReset, err)
-		}
-		fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
-		if err := ag.Rebuild(); err != nil {
-			fmt.Fprintf(os.Stderr, "%sRebuild failed:%s %v\n", ANSIRed, ANSIReset, err)
-		}
+		runRepair(desc)
 
 	default:
-		_, err := ag.Run(input)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "\n%s✗ %v%s\n", ANSIRed, err, ANSIReset)
-			handleRunError(err)
-		}
+		runWithESC(input)
 	}
 }
 
@@ -583,7 +714,7 @@ func handleRunError(err error) {
 		}
 		autoRepairAttempt++
 		fmt.Fprintf(os.Stderr, "%s🔧 Auto-repair [%d/3]...%s\n", ANSIYellow, autoRepairAttempt, ANSIReset)
-		if err := ag.AutoRepair(errMsg); err != nil {
+		if err := ag.AutoRepair(context.Background(), errMsg); err != nil {
 			fmt.Fprintf(os.Stderr, "%sRepair error:%s %v\n", ANSIRed, ANSIReset, err)
 			return
 		}
@@ -601,7 +732,7 @@ func handleRunError(err error) {
 		if scanner.Scan() {
 			key := strings.TrimSpace(strings.ToLower(scanner.Text()))
 			if key == "r" {
-				if err := ag.AutoRepair(errMsg); err != nil {
+				if err := ag.AutoRepair(context.Background(), errMsg); err != nil {
 					fmt.Fprintf(os.Stderr, "%sRepair error:%s %v\n", ANSIRed, ANSIReset, err)
 					return
 				}

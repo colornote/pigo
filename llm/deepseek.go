@@ -3,6 +3,7 @@ package llm
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,13 +76,18 @@ type CoTCallback func(reasoning string)
 // onReasoning is called for each reasoning_content chunk (the CoT chain).
 // onContent is called for each normal content chunk.
 func (c *DeepSeekClient) SendStream(req *DSRequest, onReasoning CoTCallback, onContent func(string)) (string, error) {
+	return c.SendStreamWithContext(context.Background(), req, onReasoning, onContent)
+}
+
+// SendStreamWithContext is like SendStream but with context support for cancellation.
+func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSRequest, onReasoning CoTCallback, onContent func(string)) (string, error) {
 	req.Stream = true
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", fmt.Errorf("marshal: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}

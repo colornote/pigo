@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -429,7 +430,7 @@ func (a *Agent) Footer() {
 }
 // ─── Core Run Loop ──────────────────────────────────────────────
 
-func (a *Agent) Run(prompt string) (string, error) {
+func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 	// Clean up any orphan tool_uses from previous interrupted turns.
 	// This handles the case where the user types a message while
 	// the agent's last response had pending tool calls.
@@ -451,15 +452,22 @@ func (a *Agent) Run(prompt string) (string, error) {
 	})
 
 	if a.useCoT() {
-		return a.runCoT(prompt)
+		return a.runCoT(ctx, prompt)
 	}
 
-	return a.runStandardLoop()
+	return a.runStandardLoop(ctx)
 }
 
 // runStandardLoop runs the tool-calling agent loop (non-CoT path).
-func (a *Agent) runStandardLoop() (string, error) {
+func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
+		// Check for cancellation before each turn
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
 		sysPrompt := BuildSystemPromptWithDir(a.mode, a.cfg.SystemPrompt, a.cfg.WorkDir)
 		if a.gitContext != "" {
 			sysPrompt += "\n\n" + a.gitContext
@@ -482,7 +490,7 @@ func (a *Agent) runStandardLoop() (string, error) {
 		var resp *llm.Response
 		var err error
 
-		resp, err = a.client.Send(req)
+		resp, err = a.client.SendWithContext(ctx, req)
 
 		if !textStreamed {
 			close(spinnerStop)
@@ -608,13 +616,13 @@ func (a *Agent) runStandardLoop() (string, error) {
 }
 
 // RunFromSession continues a loaded session (resume).
-func (a *Agent) RunFromSession(prompt string) (string, error) {
-	return a.Run(prompt)
+func (a *Agent) RunFromSession(ctx context.Context, prompt string) (string, error) {
+	return a.Run(ctx, prompt)
 }
 
 // ─── CoT Path ───────────────────────────────────────────────────
 
-func (a *Agent) runCoT(prompt string) (string, error) {
+func (a *Agent) runCoT(ctx context.Context, prompt string) (string, error) {
 	dsMessages := a.buildDSMessages(prompt)
 
 	req := &llm.DSRequest{
@@ -629,7 +637,7 @@ func (a *Agent) runCoT(prompt string) (string, error) {
 	reasoningStarted := false
 	contentStarted := false
 
-	finalContent, err := a.deepseekClient.SendStream(req,
+	finalContent, err := a.deepseekClient.SendStreamWithContext(ctx, req,
 		func(reasoning string) {
 			if !reasoningStarted {
 				reasoningStarted = true
@@ -766,7 +774,7 @@ func (a *Agent) useCoT() bool {
 	return a.isReasonerModel() && a.thinking != ThinkOff
 }
 
-func (a *Agent) SelfIterate() error {
+func (a *Agent) SelfIterate(ctx context.Context) error {
 	a.SetMode(ModeSelfIterate)
 	fmt.Println("🔁 Self-Iteration Mode — improving PiGo...")
 
@@ -787,13 +795,13 @@ func (a *Agent) SelfIterate() error {
 After making changes, run: go build -o pigo .
 If it fails, fix errors. Summarize changes.`, strings.Join(srcFiles, "\n"))
 
-	return a.RunCommand(prompt)
+	return a.RunCommand(ctx, prompt)
 }
 
-func (a *Agent) AutoRepair(bugDesc string) error {
+func (a *Agent) AutoRepair(ctx context.Context, bugDesc string) error {
 	a.SetMode(ModeAutoRepair)
 	fmt.Println("🔧 Auto-Repair Mode — fixing:", bugDesc)
-	return a.RunCommand("Bug report: " + bugDesc + "\n\nFix it and rebuild.")
+	return a.RunCommand(ctx, "Bug report: " + bugDesc + "\n\nFix it and rebuild.")
 }
 
 func (a *Agent) Rebuild() error {
@@ -804,8 +812,8 @@ func (a *Agent) Rebuild() error {
 	return cmd.Run()
 }
 
-func (a *Agent) RunCommand(prompt string) error {
-	_, err := a.Run(prompt)
+func (a *Agent) RunCommand(ctx context.Context, prompt string) error {
+	_, err := a.Run(ctx, prompt)
 	return err
 }
 
