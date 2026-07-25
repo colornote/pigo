@@ -1,0 +1,15 @@
+# Binary
+pigo
+
+# Environment (contains API keys)
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
