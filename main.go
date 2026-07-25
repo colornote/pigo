@@ -491,6 +491,7 @@ func runWithESC(input string) {
 	if rawErr == nil {
 		close(escDone)
 		term.Restore(int(os.Stdin.Fd()), oldState)
+		os.Stdin.SetReadDeadline(time.Time{}) // clear deadline
 	}
 
 	if err != nil {
@@ -537,6 +538,7 @@ func runSelf() {
 	if rawErr == nil {
 		close(escDone)
 		term.Restore(int(os.Stdin.Fd()), oldState)
+		os.Stdin.SetReadDeadline(time.Time{})
 	}
 
 	fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
@@ -564,6 +566,7 @@ func runRepair(desc string) {
 	if rawErr == nil {
 		close(escDone)
 		term.Restore(int(os.Stdin.Fd()), oldState)
+		os.Stdin.SetReadDeadline(time.Time{})
 	}
 
 	fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
