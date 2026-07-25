@@ -14,17 +14,6 @@ import (
 	"time"
 )
 
-// ANSI colors for TUI
-const (
-	ANSIReset  = "\033[0m"
-	ANSIRed    = "\033[31m"
-	ANSIGreen  = "\033[32m"
-	ANSIYellow = "\033[33m"
-	ANSICyan   = "\033[36m"
-	ANSIGray   = "\033[90m"
-	ANSIBold   = "\033[1m"
-)
-
 type Agent struct {
 	cfg            *config.Config
 	client         *llm.Client
@@ -36,6 +25,8 @@ type Agent struct {
 	session        *session.Session
 	sessionMan     *session.Manager
 	noSession      bool // ephemeral mode — don't save
+	autoRepair     bool // auto-trigger repair on error
+	gitContext     string // cached git project context
 	messageIDs     []string // parallel IDs for messages ↔ session entries
 }
 
@@ -47,9 +38,9 @@ func New(cfg *config.Config) *Agent {
 	reg.Register(&tools.WriteTool{})
 	reg.Register(&tools.EditTool{})
 	reg.Register(&tools.BashTool{})
+	reg.Register(&tools.LsTool{})
 	reg.Register(&tools.GrepTool{})
 	reg.Register(&tools.FindTool{})
-	reg.Register(&tools.LSTool{})
 
 	// Session manager rooted at ~/.pigo/sessions
 	home, _ := os.UserHomeDir()
@@ -59,7 +50,7 @@ func New(cfg *config.Config) *Agent {
 	}
 	sm := session.NewManager(sessDir)
 
-	return &Agent{
+	a := &Agent{
 		cfg:            cfg,
 		client:         client,
 		deepseekClient: dsClient,
@@ -69,12 +60,17 @@ func New(cfg *config.Config) *Agent {
 		thinking:       ThinkingLevel(cfg.ThinkingLevel),
 		sessionMan:     sm,
 		noSession:      cfg.NoSession,
+		autoRepair:     cfg.AutoRepair,
 		messageIDs:     []string{},
 	}
+	a.refreshGitContext()
+	return a
 }
 
-func (a *Agent) SetMode(mode Mode)  { a.mode = mode }
-func (a *Agent) Mode() Mode         { return a.mode }
+func (a *Agent) SetMode(mode Mode)           { a.mode = mode }
+func (a *Agent) Mode() Mode                  { return a.mode }
+func (a *Agent) SetAutoRepair(on bool)        { a.autoRepair = on }
+func (a *Agent) AutoRepairEnabled() bool      { return a.autoRepair }
 
 func (a *Agent) SetThinking(level ThinkingLevel) {
 	if _, ok := map[ThinkingLevel]bool{ThinkOff: true, ThinkLow: true, ThinkMedium: true, ThinkHigh: true, ThinkMax: true}[level]; ok {
@@ -122,10 +118,27 @@ func (a *Agent) ResumeSession(s *session.Session) error {
 	a.messages = nil
 	a.messageIDs = nil
 
+	// Batch consecutive tool results into a single user message.
+	// Anthropic requires all tool_results for one assistant turn
+	// to be in the same user message.
+	var pendingToolResults []interface{}
+
+	flushToolResults := func() {
+		if len(pendingToolResults) == 0 {
+			return
+		}
+		a.messages = append(a.messages, llm.Message{
+			Role:    "user",
+			Content: pendingToolResults,
+		})
+		pendingToolResults = nil
+	}
+
 	for _, entry := range s.Entries {
 		a.messageIDs = append(a.messageIDs, entry.ID)
 		switch entry.Role {
 		case "user":
+			flushToolResults()
 			a.messages = append(a.messages, llm.Message{
 				Role: "user",
 				Content: []llm.TextContent{
@@ -133,6 +146,7 @@ func (a *Agent) ResumeSession(s *session.Session) error {
 				},
 			})
 		case "assistant":
+			flushToolResults()
 			// Try to parse structured content (JSON array of text/tool_use blocks);
 			// fallback to plain text for legacy entries.
 			var structured []interface{}
@@ -150,31 +164,154 @@ func (a *Agent) ResumeSession(s *session.Session) error {
 				})
 			}
 		case "tool":
-			// Tool results are stored as user messages in Anthropic format
+			// Batch tool results: they'll be flushed together as one user message
+			// when the next non-tool entry arrives.
 			if entry.ToolUseID != "" {
-				// Proper tool_result with tool_use_id
-				a.messages = append(a.messages, llm.Message{
-					Role: "user",
-					Content: []interface{}{
-						map[string]interface{}{
-							"type":        "tool_result",
-							"tool_use_id": entry.ToolUseID,
-							"content":     entry.Content,
-						},
-					},
+				pendingToolResults = append(pendingToolResults, map[string]interface{}{
+					"type":        "tool_result",
+					"tool_use_id": entry.ToolUseID,
+					"content":     entry.Content,
 				})
 			} else {
-				// Legacy format — no tool_use_id, convert to text message
-				a.messages = append(a.messages, llm.Message{
-					Role: "user",
-					Content: []llm.TextContent{
-						{Type: "text", Text: entry.Content},
-					},
+				// Legacy format — no tool_use_id, convert to text
+				pendingToolResults = append(pendingToolResults, llm.TextContent{
+					Type: "text", Text: entry.Content,
 				})
 			}
 		}
 	}
+	// Flush any remaining tool results at end
+	flushToolResults()
+
+	// Clean orphan tool_uses anywhere in the message history.
+	// This handles sessions that were saved mid-turn before tools ran,
+	// or sessions damaged by previous bugs.
+	a.cleanOrphanToolUses()
+
 	return nil
+}
+
+// cleanOrphanToolUses scans all messages and strips tool_use blocks
+// that don't have matching tool_result blocks in the next message.
+func (a *Agent) cleanOrphanToolUses() {
+	i := 0
+	for i < len(a.messages) {
+		msg := a.messages[i]
+		if msg.Role != "assistant" {
+			i++
+			continue
+		}
+
+		toolUseIDs := collectToolUseIDs(msg.Content)
+		if len(toolUseIDs) == 0 {
+			i++
+			continue
+		}
+
+		// Last message - don't strip, it's the current turn
+		if i == len(a.messages)-1 {
+			return
+		}
+
+		// Check if the next message has matching tool_results
+		hasResults := i+1 < len(a.messages) && a.messages[i+1].Role == "user"
+		if hasResults {
+			toolResultIDs := collectToolResultIDs(a.messages[i+1].Content)
+			for _, id := range toolUseIDs {
+				if !toolResultIDs[id] {
+					hasResults = false
+					break
+				}
+			}
+		}
+
+		if hasResults {
+			i += 2
+			continue
+		}
+
+		// Orphan: strip tool_uses
+		orphans := make(map[string]bool)
+		for _, id := range toolUseIDs {
+			orphans[id] = true
+		}
+		cleaned := stripToolUses(msg.Content, orphans)
+		if cleaned == nil {
+			// Remove the entire assistant message
+			a.messages = append(a.messages[:i], a.messages[i+1:]...)
+			// Also remove the paired user message (tool_results) if present
+			if i < len(a.messages) && a.messages[i].Role == "user" && len(collectToolResultIDs(a.messages[i].Content)) > 0 {
+				a.messages = append(a.messages[:i], a.messages[i+1:]...)
+			}
+			// Don't advance i — the next message shifted into position i
+		} else {
+			a.messages[i].Content = cleaned
+			i++
+		}
+	}
+}
+
+func collectToolUseIDs(content interface{}) []string {
+	list, _ := content.([]interface{})
+	var ids []string
+	for _, block := range list {
+		switch b := block.(type) {
+		case llm.ToolUseContent:
+			ids = append(ids, b.ID)
+		case map[string]interface{}:
+			if t, _ := b["type"].(string); t == "tool_use" {
+				if id, _ := b["id"].(string); id != "" {
+					ids = append(ids, id)
+				}
+			}
+		}
+	}
+	return ids
+}
+
+func collectToolResultIDs(content interface{}) map[string]bool {
+	result := make(map[string]bool)
+	list, _ := content.([]interface{})
+	for _, block := range list {
+		switch b := block.(type) {
+		case map[string]interface{}:
+			if t, _ := b["type"].(string); t == "tool_result" {
+				if id, _ := b["tool_use_id"].(string); id != "" {
+					result[id] = true
+				}
+			}
+		}
+	}
+	return result
+}
+
+func stripToolUses(content interface{}, orphans map[string]bool) interface{} {
+	list, _ := content.([]interface{})
+	var cleaned []interface{}
+	for _, block := range list {
+		switch b := block.(type) {
+		case llm.ToolUseContent:
+			if orphans[b.ID] {
+				continue
+			}
+			cleaned = append(cleaned, b)
+		case map[string]interface{}:
+			if t, _ := b["type"].(string); t == "tool_use" {
+				if id, _ := b["id"].(string); orphans[id] {
+					continue
+				}
+				cleaned = append(cleaned, b)
+			} else {
+				cleaned = append(cleaned, b)
+			}
+		default:
+			cleaned = append(cleaned, b)
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil // remove entire message
+	}
+	return cleaned
 }
 
 // saveEntry persists a message to the session JSONL.
@@ -243,11 +380,9 @@ func (a *Agent) Footer() {
 		}
 		sessIndicator = fmt.Sprintf(" · %ssession %s%s", ANSIGray, sessID, ANSIReset)
 	}
-
-	fmt.Fprint(os.Stderr, "\n")
-	fmt.Fprintf(os.Stderr, "%s%s%s\n", ANSIGray, strings.Repeat("─", 60), ANSIReset)
-
-	fmt.Fprintf(os.Stderr, "%sDeepSeek %s%s | %sthink:%s%s | %s%s%s%s | %s◫ %s%s/%s %s(%.1f%%) AC%s",
+	// Build footer line
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%sDeepSeek %s%s | %sthink:%s%s | %s%s%s%s | %s◫ %s%s/%s %s(%.1f%%) AC%s",
 		ANSIBold, displayModel, ANSIReset,
 		ANSIGray, ANSIReset, thinking,
 		ANSIGray, ANSIReset, dir,
@@ -256,22 +391,50 @@ func (a *Agent) Footer() {
 		formatTokens(usage.InputTokens),
 		formatTokens(ctxWindow),
 		ANSIGray, pct, ANSIReset,
-	)
+	))
 
 	cacheTotal := usage.CacheHitTokens + usage.CacheWriteTokens
 	if cacheTotal > 0 {
-		fmt.Fprintf(os.Stderr, " %s|%s cache in: %s", ANSIGray, ANSIReset, formatBytes(cacheTotal*4))
+		sb.WriteString(fmt.Sprintf(" %s|%s cache in: %s", ANSIGray, ANSIReset, formatBytes(cacheTotal*4)))
 	}
 
-	fmt.Fprintf(os.Stderr, " %s|%s %s$%.2f%s\n",
+	sb.WriteString(fmt.Sprintf(" %s|%s %s$%.2f%s",
 		ANSIGray, ANSIReset,
 		ANSIYellow, cost, ANSIReset,
-	)
-}
+	))
 
+	footerLine := sb.String()
+
+	// Get terminal rows for bottom anchoring
+	termWidth, terminalRows := getTerminalSize()
+
+	if terminalRows > 0 {
+		// Save cursor, move to bottom, print footer, restore
+		fmt.Fprint(os.Stderr, "\033[s")
+		fmt.Fprintf(os.Stderr, "\033[%d;0H", terminalRows)
+		fmt.Fprint(os.Stderr, "\r\033[K") // clear line
+		fmt.Fprintf(os.Stderr, "%s%s%s", ANSIGray, strings.Repeat("─", termWidth), ANSIReset)
+		fmt.Fprintf(os.Stderr, "\n\r\033[K%s", footerLine)
+		fmt.Fprint(os.Stderr, "\033[u")
+	} else {
+		// Fallback: no terminal size available, print inline
+		w := termWidth
+		if w < 1 {
+			w = 60
+		}
+		fmt.Fprint(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, "%s%s%s\n%s\n", ANSIGray, strings.Repeat("─", w), ANSIReset, footerLine)
+	}
+
+}
 // ─── Core Run Loop ──────────────────────────────────────────────
 
 func (a *Agent) Run(prompt string) (string, error) {
+	// Clean up any orphan tool_uses from previous interrupted turns.
+	// This handles the case where the user types a message while
+	// the agent's last response had pending tool calls.
+	a.cleanOrphanToolUses()
+
 	// Init session on first message
 	if !a.noSession && a.session == nil {
 		a.InitSession("")
@@ -297,7 +460,10 @@ func (a *Agent) Run(prompt string) (string, error) {
 // runStandardLoop runs the tool-calling agent loop (non-CoT path).
 func (a *Agent) runStandardLoop() (string, error) {
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
-		sysPrompt := BuildSystemPrompt(a.mode, a.cfg.SystemPrompt)
+		sysPrompt := BuildSystemPromptWithDir(a.mode, a.cfg.SystemPrompt, a.cfg.WorkDir)
+		if a.gitContext != "" {
+			sysPrompt += "\n\n" + a.gitContext
+		}
 		maxTok := thinkingTokens[a.thinking]
 
 		req := &llm.Request{
@@ -316,22 +482,7 @@ func (a *Agent) runStandardLoop() (string, error) {
 		var resp *llm.Response
 		var err error
 
-		resp, err = a.client.SendStream(req,
-			func(text string) {
-				if !textStreamed {
-					close(spinnerStop)
-					textStreamed = true
-				}
-				fmt.Print(text)
-			},
-			func(name, id string) {
-				if !textStreamed {
-					close(spinnerStop)
-					textStreamed = true
-				}
-				fmt.Fprintf(os.Stderr, "\n%s%s %s%s\n", ANSIGreen, ANSIBold, name, ANSIReset)
-			},
-		)
+		resp, err = a.client.Send(req)
 
 		if !textStreamed {
 			close(spinnerStop)
@@ -340,6 +491,13 @@ func (a *Agent) runStandardLoop() (string, error) {
 
 		if err != nil {
 			return "", fmt.Errorf("API: %w", err)
+		}
+
+		// Print text from response (non-streaming)
+		for _, block := range resp.Content {
+			if block.Type == "text" && block.Text != "" {
+				fmt.Print(block.Text)
+			}
 		}
 
 		toolUses := []llm.ContentBlock{}
@@ -389,28 +547,62 @@ func (a *Agent) runStandardLoop() (string, error) {
 			if tool == nil {
 				toolResults[i] = map[string]interface{}{
 					"type": "tool_result", "tool_use_id": tu.ID,
-					"content": fmt.Sprintf("Unknown: %s", tu.Name), "is_error": true,
+					"content": fmt.Sprintf("Unknown: %s", tu.Name),
 				}
 				a.saveEntry("tool", fmt.Sprintf("Unknown tool: %s", tu.Name), tu.ID)
 				continue
 			}
+			// Tool header line
 			fmt.Fprintf(os.Stderr, "\n%s %s", ANSICyan, tu.Name)
+
+			// Bash: preview the command being run
+			if tu.Name == "bash" {
+				cmd, _ := tu.Input["command"].(string)
+				fmt.Fprintf(os.Stderr, " %s$ %s%s", ANSIGray, truncDisplay(cmd, 120), ANSIReset)
+			}
+
+			// Edit: preview the change (before → after snippet)
+			if tu.Name == "edit" {
+				oldText, _ := tu.Input["oldText"].(string)
+				newText, _ := tu.Input["newText"].(string)
+				displayEditPreview(oldText, newText)
+			}
+
+			// Read/Write/Grep/Find/Ls: show a short arg preview
+			if argPreview := toolArgPreview(tu); argPreview != "" {
+				fmt.Fprintf(os.Stderr, " %s%s%s", ANSIGray, argPreview, ANSIReset)
+			}
+
 			result := tool.Execute(tu.Input)
 			resultJSON := result.Output
+
 			if !result.Success {
 				resultJSON = result.Output + "\nError: " + result.Error
-				fmt.Fprintf(os.Stderr, " %s%s%s", ANSIRed, "✗", ANSIReset)
+				fmt.Fprintf(os.Stderr, " %s✗%s", ANSIRed, ANSIReset)
 			} else {
-				fmt.Fprintf(os.Stderr, " %s%s%s", ANSIGreen, "✓", ANSIReset)
+				fmt.Fprintf(os.Stderr, " %s✓%s", ANSIGreen, ANSIReset)
 			}
+
+			// Bash: show command output inline with gutter
+			if tu.Name == "bash" && result.Output != "" {
+				fmt.Fprint(os.Stderr, "\n")
+				displayBashOutput(result.Output)
+			}
+
 			fmt.Println()
+
 			toolResults[i] = map[string]interface{}{
 				"type": "tool_result", "tool_use_id": tu.ID,
-				"content": resultJSON, "is_error": !result.Success,
+				"content": resultJSON,
 			}
 			a.saveEntry("tool", resultJSON, tu.ID)
 		}
-		a.messages = append(a.messages, llm.Message{Role: "user", Content: toolResults})
+
+		// Append tool results to messages
+		a.messages = append(a.messages, llm.Message{
+			Role:    "user",
+			Content: toolResults,
+		})
 	}
 	return "", fmt.Errorf("max turns exceeded")
 }
@@ -498,7 +690,10 @@ func (a *Agent) SaveSession(name string) error {
 func (a *Agent) buildDSMessages(currentPrompt string) []llm.DSMessage {
 	var out []llm.DSMessage
 
-	sysPrompt := BuildSystemPrompt(a.mode, a.cfg.SystemPrompt)
+	sysPrompt := BuildSystemPromptWithDir(a.mode, a.cfg.SystemPrompt, a.cfg.WorkDir)
+	if a.gitContext != "" {
+		sysPrompt += "\n\n" + a.gitContext
+	}
 	if sysPrompt != "" {
 		out = append(out, llm.DSMessage{
 			Role:    "system",
@@ -636,9 +831,9 @@ func (a *Agent) Reload() (string, error) {
 	a.registry.Register(&tools.WriteTool{})
 	a.registry.Register(&tools.EditTool{})
 	a.registry.Register(&tools.BashTool{})
+	a.registry.Register(&tools.LsTool{})
 	a.registry.Register(&tools.GrepTool{})
 	a.registry.Register(&tools.FindTool{})
-	a.registry.Register(&tools.LSTool{})
 	reloaded = append(reloaded, "tools")
 
 	// 3. Re-read config (API key might have changed in .env)
@@ -650,6 +845,10 @@ func (a *Agent) Reload() (string, error) {
 		reloaded = append(reloaded, "API credentials")
 	}
 
+	// 4. Refresh git context
+	a.refreshGitContext()
+	reloaded = append(reloaded, "git context")
+
 	if len(reloaded) == 0 {
 		return "nothing changed — already up to date", nil
 	}
@@ -657,7 +856,72 @@ func (a *Agent) Reload() (string, error) {
 	return strings.Join(reloaded, ", ") + " — reloaded", nil
 }
 
-// loadContextFiles reads AGENTS.md, CLAUDE.md, and project docs.
+// refreshGitContext gathers project structure & recent git history
+// for AI context. Cached; call on startup and /reload.
+func (a *Agent) refreshGitContext() {
+	// Only if we're in a git repo
+	if _, err := exec.Command("git", "rev-parse", "--git-dir").Output(); err != nil {
+		a.gitContext = ""
+		return
+	}
+
+	var parts []string
+
+	// Branch
+	if out, err := exec.Command("git", "branch", "--show-current").Output(); err == nil {
+		branch := strings.TrimSpace(string(out))
+		if branch != "" {
+			parts = append(parts, "## Git Branch: "+branch)
+		}
+	}
+
+	// Recent commits
+	if out, err := exec.Command("git", "log", "--oneline", "-10").Output(); err == nil {
+		commits := strings.TrimSpace(string(out))
+		if commits != "" {
+			parts = append(parts, "## Recent Commits\n```\n"+commits+"\n```")
+		}
+	}
+
+	// Working tree status
+	if out, err := exec.Command("git", "status", "--short").Output(); err == nil {
+		status := strings.TrimSpace(string(out))
+		if status != "" {
+			if len(status) > 600 {
+				status = status[:600] + "\n... (truncated)"
+			}
+			parts = append(parts, "## Working Tree (git status --short)\n```\n"+status+"\n```")
+		} else {
+			parts = append(parts, "## Working Tree: clean ✓")
+		}
+	}
+
+	// Unstaged diff stat (uncommitted changes)
+	if out, err := exec.Command("git", "diff", "--stat").Output(); err == nil {
+		diff := strings.TrimSpace(string(out))
+		if diff != "" {
+			if len(diff) > 400 {
+				diff = diff[:400] + "\n..."
+			}
+			parts = append(parts, "## Unstaged Changes (git diff --stat)\n```\n"+diff+"\n```")
+		}
+	}
+
+	// Staged diff stat
+	if out, err := exec.Command("git", "diff", "--staged", "--stat").Output(); err == nil {
+		staged := strings.TrimSpace(string(out))
+		if staged != "" {
+			if len(staged) > 400 {
+				staged = staged[:400] + "\n..."
+			}
+			parts = append(parts, "## Staged Changes (git diff --staged --stat)\n```\n"+staged+"\n```")
+		}
+	}
+
+	a.gitContext = strings.Join(parts, "\n\n")
+}
+
+
 func loadContextFiles(home string) string {
 	var parts []string
 
@@ -701,6 +965,85 @@ func lookupKeyFromEnv() string {
 type Turn struct {
 	UserMessage string
 	Assistant   string
+}
+
+
+// ─── Tool Display Helpers ──────────────────────────────────────
+
+// truncDisplay truncates a string for terminal display.
+func truncDisplay(s string, maxLen int) string {
+	// Take first line only for preview
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		s = s[:idx]
+	}
+	if len(s) > maxLen {
+		return s[:maxLen-3] + "..."
+	}
+	return s
+}
+
+// displayEditPreview shows a compact before→after diff hint.
+func displayEditPreview(oldText, newText string) {
+	ol := truncDisplay(oldText, 40)
+	nl := truncDisplay(newText, 40)
+	if ol == nl {
+		return
+	}
+	fmt.Fprintf(os.Stderr, " %s-%s%s %s+%s%s",
+		ANSIRed, ol, ANSIReset,
+		ANSIGreen, nl, ANSIReset)
+}
+
+// displayBashOutput prints command output with a gutter.
+func displayBashOutput(output string) {
+	lines := strings.Split(output, "\n")
+	limit := 50
+	if len(lines) > limit {
+		lines = lines[:limit]
+		lines = append(lines, ANSIGray+"... (output truncated)"+ANSIReset)
+	}
+	for _, line := range lines {
+		// Trim trailing whitespace but keep structure
+		line = strings.TrimRight(line, " \t\r")
+		fmt.Fprintf(os.Stderr, "%s  │ %s%s\n", ANSIGray, line, ANSIReset)
+	}
+}
+
+// toolArgPreview returns a short preview of tool arguments.
+func toolArgPreview(tu llm.ContentBlock) string {
+	switch tu.Name {
+	case "read":
+		path, _ := tu.Input["path"].(string)
+		return filepath.Base(path)
+	case "write":
+		path, _ := tu.Input["path"].(string)
+		return filepath.Base(path)
+	case "grep":
+		pattern, _ := tu.Input["pattern"].(string)
+		return truncDisplay(pattern, 60)
+	case "find":
+		pattern, _ := tu.Input["pattern"].(string)
+		return truncDisplay(pattern, 40)
+	case "ls":
+		path, _ := tu.Input["path"].(string)
+		if path == "" || path == "." {
+			return "."
+		}
+		return filepath.Base(path)
+	}
+	return ""
+}
+
+func getTerminalSize() (int, int) {
+	cmd := exec.Command("stty", "size")
+	cmd.Stdin = os.Stdin
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, 0
+	}
+	var rows, cols int
+	fmt.Sscanf(string(out), "%d %d", &rows, &cols)
+	return cols, rows
 }
 
 func showSpinner(stop chan bool, done chan bool) {

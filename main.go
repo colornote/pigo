@@ -10,19 +10,19 @@ import (
 	"strings"
 )
 
-// ANSI color codes for TUI
-const (
-	ANSIReset  = "\033[0m"
-	ANSIRed    = "\033[31m"
-	ANSIGreen  = "\033[32m"
-	ANSIYellow = "\033[33m"
-	ANSICyan   = "\033[36m"
-	ANSIGray   = "\033[90m"
-	ANSIBold   = "\033[1m"
-)
-
 var ag *agent.Agent
 var startupCommandLine string
+
+// Local aliases for brevity (imported from agent package)
+const (
+	ANSIReset  = agent.ANSIReset
+	ANSIRed    = agent.ANSIRed
+	ANSIGreen  = agent.ANSIGreen
+	ANSIYellow = agent.ANSIYellow
+	ANSICyan   = agent.ANSICyan
+	ANSIGray   = agent.ANSIGray
+	ANSIBold   = agent.ANSIBold
+)
 
 func main() {
 	// Save original command line for exit display
@@ -153,6 +153,9 @@ func runInteractive() {
 		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
 	fmt.Printf("%s╚══════════════════════════════════════════╝%s\n", ANSICyan, ANSIReset)
 
+	// Show footer on startup
+	ag.Footer()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Printf("\n%s>%s ", ANSIGreen, ANSIReset)
@@ -160,7 +163,35 @@ func runInteractive() {
 			goodbye()
 			break
 		}
-		input := strings.TrimSpace(scanner.Text())
+		line := scanner.Text()
+
+		// Multi-line input: if line ends with \, continue reading
+		if strings.HasSuffix(strings.TrimSpace(line), "\\") {
+			// Strip trailing \ and continue accumulating
+			input := strings.TrimSuffix(strings.TrimSpace(line), "\\")
+			for {
+				fmt.Printf("%s…%s ", ANSIGray, ANSIReset)
+				if !scanner.Scan() {
+					goodbye()
+					os.Exit(0)
+				}
+				next := scanner.Text()
+				if strings.HasSuffix(strings.TrimSpace(next), "\\") {
+					input += "\n" + strings.TrimSuffix(strings.TrimSpace(next), "\\")
+					continue
+				}
+				input += "\n" + next
+				break
+			}
+			input = strings.TrimSpace(input)
+			if input == "" {
+				continue
+			}
+			dispatch(input)
+			continue
+		}
+
+		input := strings.TrimSpace(line)
 		if input == "" {
 			continue
 		}
@@ -204,6 +235,7 @@ func showHelp() {
 	fmt.Printf("  %s/thinking <lvl>%s   Set thinking: off/low/medium/high/max\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/self%s             Self-iterate & rebuild PiGo\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/repair <desc>%s    Auto-repair a bug\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/autorepair [on|off]%s Toggle auto-repair on error\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/mode%s             Show current mode, model, thinking\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/reload%s           Reload context files, tools, and config\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/session%s          Show current session info\n", ANSIYellow, ANSIReset)
@@ -257,6 +289,23 @@ func dispatch(input string) {
 		level := strings.TrimSpace(strings.TrimPrefix(input, "/thinking "))
 		ag.SetThinking(agent.ThinkingLevel(level))
 		fmt.Printf("%s✓%s Thinking: %s%s%s\n", ANSIGreen, ANSIReset, ANSIBold, level, ANSIReset)
+
+	case input == "/autorepair" || strings.HasPrefix(input, "/autorepair "):
+		arg := strings.TrimSpace(strings.TrimPrefix(input, "/autorepair "))
+		switch arg {
+		case "on":
+			ag.SetAutoRepair(true)
+			fmt.Printf("%s✓%s Auto-repair: %sON%s\n", ANSIGreen, ANSIReset, ANSIBold, ANSIReset)
+		case "off":
+			ag.SetAutoRepair(false)
+			fmt.Printf("%s✓%s Auto-repair: %sOFF%s\n", ANSIGreen, ANSIReset, ANSIGray, ANSIReset)
+		default:
+			status := "OFF"
+			if ag.AutoRepairEnabled() {
+				status = "ON"
+			}
+			fmt.Printf("%sAuto-repair:%s %s\n", ANSIGray, ANSIReset, status)
+		}
 
 	case input == "/mode":
 		mode, model, thinking := ag.Mode(), ag.Model(), ag.Thinking()
@@ -336,12 +385,59 @@ func dispatch(input string) {
 		_, err := ag.Run(input)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\n%s✗ %v%s\n", ANSIRed, err, ANSIReset)
-			fmt.Fprintf(os.Stderr, "%s💡 Try /repair to auto-fix%s\n", ANSIYellow, ANSIReset)
+			handleRunError(err)
 		}
 	}
 }
 
 // ─── Session Handlers ──────────────────────────────────────────
+
+// ─── Auto-Repair Trigger ──────────────────────────────────────
+var autoRepairAttempt int
+
+func handleRunError(err error) {
+	errMsg := err.Error()
+
+	if ag.AutoRepairEnabled() {
+		if autoRepairAttempt >= 3 {
+			fmt.Fprintf(os.Stderr, "%s⚠ Auto-repair limit reached (3 attempts). Use /repair manually.%s\n", ANSIYellow, ANSIReset)
+			autoRepairAttempt = 0
+			return
+		}
+		autoRepairAttempt++
+		fmt.Fprintf(os.Stderr, "%s🔧 Auto-repair [%d/3]...%s\n", ANSIYellow, autoRepairAttempt, ANSIReset)
+		if err := ag.AutoRepair(errMsg); err != nil {
+			fmt.Fprintf(os.Stderr, "%sRepair error:%s %v\n", ANSIRed, ANSIReset, err)
+			return
+		}
+		fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
+		if err := ag.Rebuild(); err != nil {
+			fmt.Fprintf(os.Stderr, "%sRebuild failed:%s %v\n", ANSIRed, ANSIReset, err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "%s✓ Rebuilt — retry your command%s\n", ANSIGreen, ANSIReset)
+		autoRepairAttempt = 0 // reset on success
+	} else {
+		fmt.Fprintf(os.Stderr, "%s💡 %sr%s to auto-repair, any key to continue%s\n", ANSIGray, ANSIYellow, ANSIGray, ANSIReset)
+		// Read single key (non-blocking scan)
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			key := strings.TrimSpace(strings.ToLower(scanner.Text()))
+			if key == "r" {
+				if err := ag.AutoRepair(errMsg); err != nil {
+					fmt.Fprintf(os.Stderr, "%sRepair error:%s %v\n", ANSIRed, ANSIReset, err)
+					return
+				}
+				fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
+				if err := ag.Rebuild(); err != nil {
+					fmt.Fprintf(os.Stderr, "%sRebuild failed:%s %v\n", ANSIRed, ANSIReset, err)
+				} else {
+					fmt.Fprintf(os.Stderr, "%s✓ Rebuilt — retry your command%s\n", ANSIGreen, ANSIReset)
+				}
+			}
+		}
+	}
+}
 
 func handleContinue() {
 	s, err := ag.SessionManager().Latest(workDir())
