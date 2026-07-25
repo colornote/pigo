@@ -102,7 +102,8 @@ pigo/
 - [x] 模式系统 (normal/self/repair)
 - [x] 流式输出
 - [x] Token 用量追踪 & Footer
-- [ ] 会话保存/加载 (JSONL)
+- [x] 会话保存/加载 (JSONL)
+- [x] grep/find/ls 工具
 - [ ] 自动修复触发
 - [ ] git-aware 上下文加载
 - [ ] Permission 系统

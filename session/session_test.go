@@ -38,9 +38,9 @@ func TestSessionAddAndLoad(t *testing.T) {
 	}
 
 	// Add entries
-	s.AddEntry("", "user", "Hello")
-	s.AddEntry(s.LastID(), "assistant", "Hi there!")
-	s.AddEntry(s.LastID(), "user", "Do stuff")
+	s.AddEntry("", "user", "Hello", "")
+	s.AddEntry(s.LastID(), "assistant", "Hi there!", "")
+	s.AddEntry(s.LastID(), "user", "Do stuff", "")
 
 	if s.Count() != 3 {
 		t.Errorf("expected 3 entries, got %d", s.Count())
@@ -81,10 +81,10 @@ func TestSessionLatest(t *testing.T) {
 	cwd := "/test/project3"
 
 	s1, _ := m.Create(cwd, "first")
-	s1.AddEntry("", "user", "old")
+	s1.AddEntry("", "user", "old", "")
 
 	s2, _ := m.Create(cwd, "second")
-	s2.AddEntry("", "user", "newer")
+	s2.AddEntry("", "user", "newer", "")
 
 	latest, err := m.Latest(cwd)
 	if err != nil {
@@ -134,8 +134,8 @@ func TestSessionMessages(t *testing.T) {
 	m := NewManager(dir)
 
 	s, _ := m.Create("/test/project5", "")
-	s.AddEntry("", "user", "msg1")
-	s.AddEntry(s.LastID(), "assistant", "msg2")
+	s.AddEntry("", "user", "msg1", "")
+	s.AddEntry(s.LastID(), "assistant", "msg2", "")
 
 	msgs := s.Messages()
 	if len(msgs) != 2 {

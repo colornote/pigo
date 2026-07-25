@@ -289,3 +289,244 @@ func (t *BashTool) Execute(input map[string]interface{}) *Result {
 	}
 	return &Result{Success: true, Output: outStr}
 }
+
+// GrepTool — search file contents with a regex pattern
+type GrepTool struct{}
+
+func (t *GrepTool) Name() string { return "grep" }
+
+func (t *GrepTool) Description() string {
+	return "Search for a regex pattern in files. Returns matching lines with file paths and line numbers."
+}
+
+func (t *GrepTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"pattern": map[string]interface{}{
+				"type":        "string",
+				"description": "Regex pattern to search for",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "File or directory to search in (default: current directory)",
+			},
+			"include": map[string]interface{}{
+				"type":        "string",
+				"description": "File glob pattern to include (e.g. '*.go', '*.md')",
+			},
+		},
+		"required": []string{"pattern"},
+	}
+}
+
+func (t *GrepTool) Execute(input map[string]interface{}) *Result {
+	pattern, _ := input["pattern"].(string)
+	searchPath, _ := input["path"].(string)
+	include, _ := input["include"].(string)
+
+	if pattern == "" {
+		return &Result{Error: "pattern required"}
+	}
+	if searchPath == "" {
+		searchPath = "."
+	}
+
+	args := []string{"-rn", "--color=never"}
+	if include != "" {
+		args = append(args, "--include", include)
+	}
+	args = append(args, pattern, searchPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "grep", args...)
+	output, err := cmd.CombinedOutput()
+
+	outStr := string(output)
+	// grep returns exit code 1 if no matches found
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return &Result{Error: "grep timed out"}
+		}
+		if len(outStr) == 0 {
+			return &Result{Success: true, Output: "(no matches)"}
+		}
+		return &Result{Success: false, Output: outStr, Error: err.Error()}
+	}
+
+	if len(outStr) > 50000 {
+		outStr = outStr[:50000] + "\n\n[Truncated...]"
+	}
+	if outStr == "" {
+		outStr = "(no matches)"
+	}
+
+	return &Result{Success: true, Output: outStr}
+}
+
+// FindTool — find files by name
+type FindTool struct{}
+
+func (t *FindTool) Name() string { return "find" }
+
+func (t *FindTool) Description() string {
+	return "Find files matching a glob pattern."
+}
+
+func (t *FindTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"pattern": map[string]interface{}{
+				"type":        "string",
+				"description": "Glob pattern to match (e.g. '*.go', '**/*_test.go')",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Directory to search in (default: current directory)",
+			},
+		},
+		"required": []string{"pattern"},
+	}
+}
+
+func (t *FindTool) Execute(input map[string]interface{}) *Result {
+	pattern, _ := input["pattern"].(string)
+	searchPath, _ := input["path"].(string)
+
+	if pattern == "" {
+		return &Result{Error: "pattern required"}
+	}
+	if searchPath == "" {
+		searchPath = "."
+	}
+
+	var matches []string
+	err := filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip inaccessible paths
+		}
+		// Skip hidden dirs & common VCS
+		if info.IsDir() {
+			base := filepath.Base(path)
+			if strings.HasPrefix(base, ".") && base != "." && base != ".." {
+				return filepath.SkipDir
+			}
+			if base == "node_modules" || base == "vendor" || base == "__pycache__" || base == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		matched, err := filepath.Match(pattern, filepath.Base(path))
+		if err != nil {
+			return nil
+		}
+		if matched {
+			rel, _ := filepath.Rel(searchPath, path)
+			matches = append(matches, rel)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return &Result{Error: err.Error()}
+	}
+
+	if len(matches) == 0 {
+		return &Result{Success: true, Output: "(no files found)"}
+	}
+
+	// Also try recursive matching for ** patterns
+	// filepath.Match doesn't handle **, so do a simple check
+	if strings.Contains(pattern, "**") {
+		// Re-run without the filepath.Base restriction
+		matches = nil
+		filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				base := filepath.Base(path)
+				if strings.HasPrefix(base, ".") && base != "." && base != ".." {
+					return filepath.SkipDir
+				}
+				if base == "node_modules" || base == "vendor" || base == "__pycache__" || base == ".git" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			rel, _ := filepath.Rel(searchPath, path)
+			matched, err := filepath.Match(pattern, rel)
+			if err != nil {
+				return nil
+			}
+			if matched {
+				matches = append(matches, rel)
+			}
+			return nil
+		})
+	}
+
+	outStr := strings.Join(matches, "\n")
+	if len(outStr) > 50000 {
+		outStr = outStr[:50000] + "\n\n[Truncated...]"
+	}
+
+	return &Result{Success: true, Output: fmt.Sprintf("%d files:\n%s", len(matches), outStr)}
+}
+
+// LSTool — list directory contents
+type LSTool struct{}
+
+func (t *LSTool) Name() string { return "ls" }
+
+func (t *LSTool) Description() string {
+	return "List directory contents."
+}
+
+func (t *LSTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Directory path to list (default: current directory)",
+			},
+		},
+		"required": []string{},
+	}
+}
+
+func (t *LSTool) Execute(input map[string]interface{}) *Result {
+	dirPath, _ := input["path"].(string)
+	if dirPath == "" {
+		dirPath = "."
+	}
+
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return &Result{Error: err.Error()}
+	}
+
+	var lines []string
+	for _, e := range entries {
+		prefix := ""
+		if e.IsDir() {
+			prefix = "/"
+		}
+		info, err := e.Info()
+		if err == nil {
+			lines = append(lines, fmt.Sprintf("%s%s  (%s)", prefix, e.Name(), info.ModTime().Format("Jan 02 15:04")))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s%s", prefix, e.Name()))
+		}
+	}
+
+	outStr := strings.Join(lines, "\n")
+	if len(outStr) > 50000 {
+		outStr = outStr[:50000] + "\n\n[Truncated...]"
+	}
+	return &Result{Success: true, Output: outStr}
+}
