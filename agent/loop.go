@@ -81,8 +81,9 @@ func (a *Agent) SetThinking(level ThinkingLevel) {
 func (a *Agent) Thinking() ThinkingLevel { return a.thinking }
 
 func (a *Agent) SwitchModel(name string) {
-	a.cfg.Model = name
-	a.client = llm.New(a.cfg.APIKey, a.cfg.BaseURL, name)
+	normalized := NormalizeModel(name)
+	a.cfg.Model = normalized
+	a.client = llm.New(a.cfg.APIKey, a.cfg.BaseURL, normalized)
 	a.client.TotalUsage = llm.Usage{}
 	a.deepseekClient.TotalUsage = llm.Usage{}
 }
@@ -406,26 +407,15 @@ func (a *Agent) Footer() {
 
 	footerLine := sb.String()
 
-	// Get terminal rows for bottom anchoring
-	termWidth, terminalRows := getTerminalSize()
-
-	if terminalRows > 0 {
-		// Save cursor, move to bottom, print footer, restore
-		fmt.Fprint(os.Stderr, "\033[s")
-		fmt.Fprintf(os.Stderr, "\033[%d;0H", terminalRows)
-		fmt.Fprint(os.Stderr, "\r\033[K") // clear line
-		fmt.Fprintf(os.Stderr, "%s%s%s", ANSIGray, strings.Repeat("─", termWidth), ANSIReset)
-		fmt.Fprintf(os.Stderr, "\n\r\033[K%s", footerLine)
-		fmt.Fprint(os.Stderr, "\033[u")
-	} else {
-		// Fallback: no terminal size available, print inline
-		w := termWidth
-		if w < 1 {
-			w = 60
-		}
-		fmt.Fprint(os.Stderr, "\n")
-		fmt.Fprintf(os.Stderr, "%s%s%s\n%s\n", ANSIGray, strings.Repeat("─", w), ANSIReset, footerLine)
+	// Always print inline — avoids cursor-positioning issues
+	// across different terminals (some don't support \033[s/\033[u)
+	termWidth, _ := getTerminalSize()
+	w := termWidth
+	if w < 1 {
+		w = 60
 	}
+	fmt.Fprint(os.Stderr, "\n")
+	fmt.Fprintf(os.Stderr, "%s%s%s\n%s\n", ANSIGray, strings.Repeat("─", w), ANSIReset, footerLine)
 
 }
 // ─── Core Run Loop ──────────────────────────────────────────────
@@ -486,15 +476,9 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		spinnerDone := make(chan bool)
 		go showSpinner(spinnerStop, spinnerDone)
 
-		textStreamed := false
-		var resp *llm.Response
-		var err error
+		resp, err := a.client.SendWithContext(ctx, req)
 
-		resp, err = a.client.SendWithContext(ctx, req)
-
-		if !textStreamed {
-			close(spinnerStop)
-		}
+		close(spinnerStop)
 		<-spinnerDone
 
 		if err != nil {
@@ -613,11 +597,6 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		})
 	}
 	return "", fmt.Errorf("max turns exceeded")
-}
-
-// RunFromSession continues a loaded session (resume).
-func (a *Agent) RunFromSession(ctx context.Context, prompt string) (string, error) {
-	return a.Run(ctx, prompt)
 }
 
 // ─── CoT Path ───────────────────────────────────────────────────
@@ -969,12 +948,6 @@ func lookupKeyFromEnv() string {
 	}
 	return ""
 }
-
-type Turn struct {
-	UserMessage string
-	Assistant   string
-}
-
 
 // ─── Tool Display Helpers ──────────────────────────────────────
 
