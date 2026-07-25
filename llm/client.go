@@ -3,6 +3,7 @@ package llm
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -96,12 +97,16 @@ func New(apiKey, baseURL, model string) *Client {
 }
 
 func (c *Client) Send(req *Request) (*Response, error) {
+	return c.SendWithContext(context.Background(), req)
+}
+
+func (c *Client) SendWithContext(ctx context.Context, req *Request) (*Response, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", c.baseURL+"/v1/messages", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
