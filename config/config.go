@@ -15,6 +15,10 @@ type Config struct {
 	SystemPrompt  string
 	WorkDir       string
 	MaxTurns      int
+	NoSession     bool   // ephemeral mode
+	SessionName   string // optional session display name
+	SessionPath   string // specific session file to load
+	Continue      bool   // continue latest session
 }
 
 func Load() *Config {

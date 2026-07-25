@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"pigo/config"
 	"pigo/llm"
+	"pigo/session"
 	"pigo/tools"
 	"strings"
 	"time"
@@ -31,17 +32,28 @@ type Agent struct {
 	messages       []llm.Message
 	mode           Mode
 	thinking       ThinkingLevel
+	session        *session.Session
+	sessionMan     *session.Manager
+	noSession      bool // ephemeral mode — don't save
+	messageIDs     []string // parallel IDs for messages ↔ session entries
 }
 
 func New(cfg *config.Config) *Agent {
 	client := llm.New(cfg.APIKey, cfg.BaseURL, cfg.Model)
-	// Native DeepSeek API for reasoner/CoT support
 	dsClient := llm.NewDeepSeekClient(cfg.APIKey, "https://api.deepseek.com")
 	reg := tools.NewRegistry()
 	reg.Register(&tools.ReadTool{})
 	reg.Register(&tools.WriteTool{})
 	reg.Register(&tools.EditTool{})
 	reg.Register(&tools.BashTool{})
+
+	// Session manager rooted at ~/.pigo/sessions
+	home, _ := os.UserHomeDir()
+	sessDir := filepath.Join(home, ".pigo", "sessions")
+	if d := os.Getenv("PIGO_SESSION_DIR"); d != "" {
+		sessDir = d
+	}
+	sm := session.NewManager(sessDir)
 
 	return &Agent{
 		cfg:            cfg,
@@ -51,6 +63,9 @@ func New(cfg *config.Config) *Agent {
 		messages:       []llm.Message{},
 		mode:           ModeNormal,
 		thinking:       ThinkingLevel(cfg.ThinkingLevel),
+		sessionMan:     sm,
+		noSession:      cfg.NoSession,
+		messageIDs:     []string{},
 	}
 }
 
@@ -67,14 +82,108 @@ func (a *Agent) Thinking() ThinkingLevel { return a.thinking }
 func (a *Agent) SwitchModel(name string) {
 	a.cfg.Model = name
 	a.client = llm.New(a.cfg.APIKey, a.cfg.BaseURL, name)
-	// Reset usage on model switch
 	a.client.TotalUsage = llm.Usage{}
 	a.deepseekClient.TotalUsage = llm.Usage{}
 }
 
 func (a *Agent) Model() string { return a.cfg.Model }
 
-// TotalUsage returns combined usage from both clients
+// ─── Session Management ──────────────────────────────────────────
+
+// Session returns the current session (nil if ephemeral).
+func (a *Agent) Session() *session.Session { return a.session }
+
+// IsEphemeral returns true if running without session persistence.
+func (a *Agent) IsEphemeral() bool { return a.noSession }
+
+// SessionManager returns the session manager.
+func (a *Agent) SessionManager() *session.Manager { return a.sessionMan }
+
+// InitSession creates a new session for this agent.
+func (a *Agent) InitSession(name string) error {
+	if a.noSession {
+		return nil
+	}
+	s, err := a.sessionMan.Create(a.cfg.WorkDir, name)
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	a.session = s
+	return nil
+}
+
+// ResumeSession resumes from an existing session by loading its entries into history.
+func (a *Agent) ResumeSession(s *session.Session) error {
+	a.session = s
+	a.messages = nil
+	a.messageIDs = nil
+
+	for _, entry := range s.Entries {
+		a.messageIDs = append(a.messageIDs, entry.ID)
+		switch entry.Role {
+		case "user":
+			a.messages = append(a.messages, llm.Message{
+				Role: "user",
+				Content: []llm.TextContent{
+					{Type: "text", Text: entry.Content},
+				},
+			})
+		case "assistant":
+			// Try to parse structured content; fallback to plain text
+			a.messages = append(a.messages, llm.Message{
+				Role: "assistant",
+				Content: []llm.TextContent{
+					{Type: "text", Text: entry.Content},
+				},
+			})
+		case "tool":
+			// Tool results are stored as user messages in Anthropic format
+			if entry.ToolUseID != "" {
+				// Proper tool_result with tool_use_id
+				a.messages = append(a.messages, llm.Message{
+					Role: "user",
+					Content: []interface{}{
+						map[string]interface{}{
+							"type":        "tool_result",
+							"tool_use_id": entry.ToolUseID,
+							"content":     entry.Content,
+						},
+					},
+				})
+			} else {
+				// Legacy format — no tool_use_id, convert to text message
+				a.messages = append(a.messages, llm.Message{
+					Role: "user",
+					Content: []llm.TextContent{
+						{Type: "text", Text: entry.Content},
+					},
+				})
+			}
+		}
+	}
+	return nil
+}
+
+// saveEntry persists a message to the session JSONL.
+func (a *Agent) saveEntry(role, content string, toolUseID string) {
+	if a.noSession || a.session == nil {
+		return
+	}
+	parentID := ""
+	if len(a.messageIDs) > 0 {
+		parentID = a.messageIDs[len(a.messageIDs)-1]
+	}
+	if err := a.session.AddEntry(parentID, role, content, toolUseID); err != nil {
+		fmt.Fprintf(os.Stderr, "%s⚠ session write: %v%s\n", ANSIYellow, err, ANSIReset)
+		return
+	}
+	a.messageIDs = append(a.messageIDs, a.session.LastID())
+	// Keep meta in sync (name might have been set)
+	a.session.WriteMeta()
+}
+
+// ─── Usage & Footer ─────────────────────────────────────────────
+
 func (a *Agent) TotalUsage() llm.Usage {
 	return llm.Usage{
 		InputTokens:      a.client.TotalUsage.InputTokens + a.deepseekClient.TotalUsage.InputTokens,
@@ -85,7 +194,6 @@ func (a *Agent) TotalUsage() llm.Usage {
 	}
 }
 
-// Footer prints the status footer line
 func (a *Agent) Footer() {
 	usage := a.TotalUsage()
 	model := a.Model()
@@ -97,9 +205,8 @@ func (a *Agent) Footer() {
 	}
 	cost := usage.CostUSD(model)
 
-	// Model display name (prettify)
 	displayModel := model
-	if strings.Contains(model, "[1m]") {
+	if strings.Contains(model, "v4-pro") {
 		displayModel = "V4 Pro 1M"
 	} else if strings.Contains(model, "flash") {
 		displayModel = "V4 Flash"
@@ -109,94 +216,57 @@ func (a *Agent) Footer() {
 		displayModel = "Reasoner"
 	}
 
-	// Short dir
 	dir := a.cfg.WorkDir
 	if len(dir) > 24 {
 		dir = "…" + dir[len(dir)-23:]
 	}
 
-	// Separator + footer
+	// Session indicator
+	sessIndicator := ""
+	if !a.noSession && a.session != nil {
+		sessID := a.session.ID
+		if len(sessID) > 8 {
+			sessID = sessID[:8]
+		}
+		sessIndicator = fmt.Sprintf(" · %ssession %s%s", ANSIGray, sessID, ANSIReset)
+	}
+
 	fmt.Fprint(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, "%s%s%s\n", ANSIGray, strings.Repeat("─", 60), ANSIReset)
 
-	// Format: DeepSeek V4 Pro | think:max | dir workspace | ◫ 216k/1.0M (21.6%) AC | cache in: 21M | $0.24
-	fmt.Fprintf(os.Stderr, "%sDeepSeek %s%s | %sthink:%s%s | %s%s%s | %s◫ %s%s/%s %s(%.1f%%) AC%s",
+	fmt.Fprintf(os.Stderr, "%sDeepSeek %s%s | %sthink:%s%s | %s%s%s%s | %s◫ %s%s/%s %s(%.1f%%) AC%s",
 		ANSIBold, displayModel, ANSIReset,
 		ANSIGray, ANSIReset, thinking,
 		ANSIGray, ANSIReset, dir,
+		sessIndicator,
 		ANSIGray, ANSIReset,
 		formatTokens(usage.InputTokens),
 		formatTokens(ctxWindow),
 		ANSIGray, pct, ANSIReset,
 	)
 
-	// Cache info
 	cacheTotal := usage.CacheHitTokens + usage.CacheWriteTokens
 	if cacheTotal > 0 {
 		fmt.Fprintf(os.Stderr, " %s|%s cache in: %s", ANSIGray, ANSIReset, formatBytes(cacheTotal*4))
 	}
 
-	// Cost
-	fmt.Fprintf(os.Stderr, " %s|%s %s$%.2f%s",
+	fmt.Fprintf(os.Stderr, " %s|%s %s$%.2f%s\n",
 		ANSIGray, ANSIReset,
 		ANSIYellow, cost, ANSIReset,
 	)
 }
 
-func formatTokens(n int) string {
-	if n < 1000 {
-		return fmt.Sprintf("%d", n)
-	}
-	if n < 10000 {
-		return fmt.Sprintf("%.1fk", float64(n)/1000)
-	}
-	if n < 1000000 {
-		return fmt.Sprintf("%dk", n/1000)
-	}
-	if n < 10_000_000 {
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	}
-	return fmt.Sprintf("%dM", n/1_000_000)
-}
-
-func formatBytes(n int) string {
-	if n < 1024 {
-		return fmt.Sprintf("%dB", n)
-	}
-	if n < 1024*1024 {
-		return fmt.Sprintf("%dK", n/1024)
-	}
-	return fmt.Sprintf("%dM", n/(1024*1024))
-}
-
-// isReasonerModel checks if the current model supports native CoT/reasoning
-func (a *Agent) isReasonerModel() bool {
-	return strings.Contains(a.cfg.Model, "reasoner")
-}
-
-// useCoT returns true when CoT chain should be used (reasoner model + thinking on)
-func (a *Agent) useCoT() bool {
-	return a.isReasonerModel() && a.thinking != ThinkOff
-}
-
-// Spinner for thinking indicator
-func showSpinner(stop chan bool) {
-	chars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	i := 0
-	for {
-		select {
-		case <-stop:
-			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 20))
-			return
-		default:
-			fmt.Fprintf(os.Stderr, "\r%s %sthinking...%s ", chars[i%len(chars)], ANSIGray, ANSIReset)
-			i++
-			time.Sleep(80 * time.Millisecond)
-		}
-	}
-}
+// ─── Core Run Loop ──────────────────────────────────────────────
 
 func (a *Agent) Run(prompt string) (string, error) {
+	// Init session on first message
+	if !a.noSession && a.session == nil {
+		a.InitSession("")
+	}
+
+	// Save user message
+	a.saveEntry("user", prompt, "")
+
 	a.messages = append(a.messages, llm.Message{
 		Role: "user",
 		Content: []llm.TextContent{
@@ -204,12 +274,15 @@ func (a *Agent) Run(prompt string) (string, error) {
 		},
 	})
 
-	// ─── CoT Path: reasoner model with thinking enabled ───
 	if a.useCoT() {
 		return a.runCoT(prompt)
 	}
 
-	// ─── Standard Path: tool-capable models ───
+	return a.runStandardLoop()
+}
+
+// runStandardLoop runs the tool-calling agent loop (non-CoT path).
+func (a *Agent) runStandardLoop() (string, error) {
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
 		sysPrompt := BuildSystemPrompt(a.mode, a.cfg.SystemPrompt)
 		maxTok := thinkingTokens[a.thinking]
@@ -222,9 +295,9 @@ func (a *Agent) Run(prompt string) (string, error) {
 			Tools:     a.buildToolDefs(),
 		}
 
-		// Start spinner while waiting for first token
 		spinnerStop := make(chan bool)
-		go showSpinner(spinnerStop)
+		spinnerDone := make(chan bool)
+		go showSpinner(spinnerStop, spinnerDone)
 
 		textStreamed := false
 		var resp *llm.Response
@@ -250,12 +323,12 @@ func (a *Agent) Run(prompt string) (string, error) {
 		if !textStreamed {
 			close(spinnerStop)
 		}
+		<-spinnerDone
 
 		if err != nil {
 			return "", fmt.Errorf("API: %w", err)
 		}
 
-		// Process response content
 		toolUses := []llm.ContentBlock{}
 		var textParts []string
 
@@ -270,7 +343,7 @@ func (a *Agent) Run(prompt string) (string, error) {
 
 		assistantText := strings.Join(textParts, "")
 
-		// Build assistant message for history
+		// Build assistant message and save
 		var assistantContent []interface{}
 		for _, block := range resp.Content {
 			switch block.Type {
@@ -282,6 +355,7 @@ func (a *Agent) Run(prompt string) (string, error) {
 		}
 
 		a.messages = append(a.messages, llm.Message{Role: "assistant", Content: assistantContent})
+		a.saveEntry("assistant", assistantText, "")
 
 		if len(toolUses) == 0 {
 			if assistantText != "" {
@@ -300,6 +374,7 @@ func (a *Agent) Run(prompt string) (string, error) {
 					"type": "tool_result", "tool_use_id": tu.ID,
 					"content": fmt.Sprintf("Unknown: %s", tu.Name), "is_error": true,
 				}
+				a.saveEntry("tool", fmt.Sprintf("Unknown tool: %s", tu.Name), tu.ID)
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "\n%s %s", ANSICyan, tu.Name)
@@ -316,17 +391,21 @@ func (a *Agent) Run(prompt string) (string, error) {
 				"type": "tool_result", "tool_use_id": tu.ID,
 				"content": resultJSON, "is_error": !result.Success,
 			}
+			a.saveEntry("tool", resultJSON, tu.ID)
 		}
 		a.messages = append(a.messages, llm.Message{Role: "user", Content: toolResults})
 	}
 	return "", fmt.Errorf("max turns exceeded")
 }
 
-// runCoT executes a Chain-of-Thought run using the native DeepSeek API.
-// It streams reasoning_content (the "thinking chain") in real-time,
-// then displays the final answer.
+// RunFromSession continues a loaded session (resume).
+func (a *Agent) RunFromSession(prompt string) (string, error) {
+	return a.Run(prompt)
+}
+
+// ─── CoT Path ───────────────────────────────────────────────────
+
 func (a *Agent) runCoT(prompt string) (string, error) {
-	// Build messages for native API
 	dsMessages := a.buildDSMessages(prompt)
 
 	req := &llm.DSRequest{
@@ -335,7 +414,6 @@ func (a *Agent) runCoT(prompt string) (string, error) {
 		MaxTokens: thinkingTokens[a.thinking],
 	}
 
-	// Show CoT header
 	fmt.Printf("\n%s💭 思考链 · Chain of Thought%s\n", ANSICyan, ANSIReset)
 	fmt.Print(strings.Repeat("─", 50) + "\n")
 
@@ -343,7 +421,6 @@ func (a *Agent) runCoT(prompt string) (string, error) {
 	contentStarted := false
 
 	finalContent, err := a.deepseekClient.SendStream(req,
-		// onReasoning — called for each reasoning_content chunk
 		func(reasoning string) {
 			if !reasoningStarted {
 				reasoningStarted = true
@@ -351,7 +428,6 @@ func (a *Agent) runCoT(prompt string) (string, error) {
 			}
 			fmt.Fprint(os.Stderr, reasoning)
 		},
-		// onContent — called for each normal content chunk
 		func(content string) {
 			if reasoningStarted && !contentStarted {
 				contentStarted = true
@@ -367,8 +443,6 @@ func (a *Agent) runCoT(prompt string) (string, error) {
 		return "", fmt.Errorf("CoT API: %w", err)
 	}
 
-	// If no content was streamed (e.g. pure reasoning without final answer),
-	// still close the reasoning section cleanly
 	if !contentStarted && reasoningStarted {
 		fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
 		fmt.Print(strings.Repeat("─", 50) + "\n")
@@ -379,12 +453,34 @@ func (a *Agent) runCoT(prompt string) (string, error) {
 	return finalContent, nil
 }
 
-// buildDSMessages converts the agent's internal message history to
-// DeepSeek native format (flat role+content, no content blocks).
+// ─── Session-aware save ────────────────────────────────────────
+
+// SaveSession explicitly saves the current session (useful for /save command).
+// If no session exists yet, creates one.
+func (a *Agent) SaveSession(name string) error {
+	if a.noSession {
+		return fmt.Errorf("ephemeral mode — sessions disabled")
+	}
+	if a.session == nil {
+		if err := a.InitSession(name); err != nil {
+			return err
+		}
+		return nil // InitSession already writes meta & flush
+	}
+	if name != "" {
+		a.session.Name = name
+	}
+	if err := a.session.Flush(); err != nil {
+		return err
+	}
+	return a.session.WriteMeta()
+}
+
+// ─── Helpers ───────────────────────────────────────────────────
+
 func (a *Agent) buildDSMessages(currentPrompt string) []llm.DSMessage {
 	var out []llm.DSMessage
 
-	// System prompt
 	sysPrompt := BuildSystemPrompt(a.mode, a.cfg.SystemPrompt)
 	if sysPrompt != "" {
 		out = append(out, llm.DSMessage{
@@ -393,13 +489,10 @@ func (a *Agent) buildDSMessages(currentPrompt string) []llm.DSMessage {
 		})
 	}
 
-	// Convert conversation history (skip the last user message we just appended)
 	for i, msg := range a.messages {
-		// Skip the last user message — we'll add it as the final prompt
 		if i == len(a.messages)-1 && msg.Role == "user" {
 			continue
 		}
-
 		switch msg.Role {
 		case "user":
 			text := extractTextContent(msg.Content)
@@ -410,13 +503,10 @@ func (a *Agent) buildDSMessages(currentPrompt string) []llm.DSMessage {
 		}
 	}
 
-	// Add current prompt
 	out = append(out, llm.DSMessage{Role: "user", Content: currentPrompt})
-
 	return out
 }
 
-// extractTextContent extracts plain text from mixed content blocks
 func extractTextContent(content interface{}) string {
 	switch c := content.(type) {
 	case string:
@@ -454,6 +544,14 @@ func (a *Agent) buildToolDefs() []llm.Tool {
 		})
 	}
 	return defs
+}
+
+func (a *Agent) isReasonerModel() bool {
+	return strings.Contains(a.cfg.Model, "reasoner")
+}
+
+func (a *Agent) useCoT() bool {
+	return a.isReasonerModel() && a.thinking != ThinkOff
 }
 
 func (a *Agent) SelfIterate() error {
@@ -504,7 +602,49 @@ type Turn struct {
 	Assistant   string
 }
 
-// thinking tokens
+func showSpinner(stop chan bool, done chan bool) {
+	chars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	i := 0
+	for {
+		select {
+		case <-stop:
+			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 20))
+			done <- true
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "\r%s %sthinking...%s ", chars[i%len(chars)], ANSIGray, ANSIReset)
+			i++
+			time.Sleep(80 * time.Millisecond)
+		}
+	}
+}
+
+func formatTokens(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	if n < 10000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	if n < 1000000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	if n < 10_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	return fmt.Sprintf("%dM", n/1_000_000)
+}
+
+func formatBytes(n int) string {
+	if n < 1024 {
+		return fmt.Sprintf("%dB", n)
+	}
+	if n < 1024*1024 {
+		return fmt.Sprintf("%dK", n/1024)
+	}
+	return fmt.Sprintf("%dM", n/(1024*1024))
+}
+
 var thinkingTokens = map[ThinkingLevel]int{
 	ThinkOff:    2048,
 	ThinkLow:    4096,
