@@ -481,17 +481,22 @@ func runWithESC(input string) {
 
 	// Switch to raw mode for ESC detection
 	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+	listenerDone := make(chan struct{})
 	if rawErr == nil {
-		go startESCListener(cancel)
+		go func() {
+			startESCListener(cancel)
+			close(listenerDone)
+		}()
 	}
 
 	result, err := ag.Run(ctx, input)
 
-	// Signal ESC listener to stop, then restore terminal
+	// Signal ESC listener to stop, wait for it, then restore terminal
 	if rawErr == nil {
 		close(escDone)
+		<-listenerDone
 		term.Restore(int(os.Stdin.Fd()), oldState)
-		os.Stdin.SetReadDeadline(time.Time{}) // clear deadline
+		os.Stdin.SetReadDeadline(time.Time{})
 	}
 
 	if err != nil {
@@ -527,8 +532,12 @@ func runSelf() {
 	escDone = make(chan struct{})
 
 	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+	listenerDone := make(chan struct{})
 	if rawErr == nil {
-		go startESCListener(cancel)
+		go func() {
+			startESCListener(cancel)
+			close(listenerDone)
+		}()
 	}
 
 	if err := ag.SelfIterate(ctx); err != nil {
@@ -537,6 +546,7 @@ func runSelf() {
 
 	if rawErr == nil {
 		close(escDone)
+		<-listenerDone
 		term.Restore(int(os.Stdin.Fd()), oldState)
 		os.Stdin.SetReadDeadline(time.Time{})
 	}
@@ -555,8 +565,12 @@ func runRepair(desc string) {
 	escDone = make(chan struct{})
 
 	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+	listenerDone := make(chan struct{})
 	if rawErr == nil {
-		go startESCListener(cancel)
+		go func() {
+			startESCListener(cancel)
+			close(listenerDone)
+		}()
 	}
 
 	if err := ag.AutoRepair(ctx, desc); err != nil {
@@ -565,6 +579,7 @@ func runRepair(desc string) {
 
 	if rawErr == nil {
 		close(escDone)
+		<-listenerDone
 		term.Restore(int(os.Stdin.Fd()), oldState)
 		os.Stdin.SetReadDeadline(time.Time{})
 	}
