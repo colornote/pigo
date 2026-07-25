@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -129,6 +130,10 @@ func (c *Client) Send(req *Request) (*Response, error) {
 
 func (c *Client) SendStream(req *Request, onText func(string), onToolStart func(string, string)) (*Response, error) {
 	req.Stream = true
+	if os.Getenv("PIGO_DEBUG") == "1" {
+		dbg, _ := json.MarshalIndent(req, "", "  ")
+		fmt.Fprintf(os.Stderr, "\n[REQUEST]\n%s\n", string(dbg))
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err

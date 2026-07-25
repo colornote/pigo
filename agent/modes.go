@@ -38,10 +38,11 @@ const DeepSeekBaseURL = "https://api.deepseek.com/anthropic"
 
 // DeepSeek 可用模型
 var DeepSeekModels = map[string]string{
-	"deepseek-v4-flash":      "DeepSeek V4 Flash — 快速推理",
-	"deepseek-v4-pro[1m]":    "DeepSeek V4 Pro 1M — 长上下文",
-	"deepseek-chat":          "DeepSeek Chat — 通用",
-	"deepseek-reasoner":      "DeepSeek Reasoner — 深度推理 · 线上CoT",
+	"deepseek-v4-flash":    "V4 Flash — 快速",
+	"deepseek-v4-pro[1m]":  "V4 Pro 1M — 长上下文",
+	"deepseek-v4-pro":      "V4 Pro — 别名",
+	"deepseek-chat":        "Chat — 通用",
+	"deepseek-reasoner":    "Reasoner — 深度推理",
 }
 
 // CoTModels lists models that support Chain-of-Thought streaming
@@ -51,7 +52,17 @@ var CoTModels = map[string]bool{
 
 // BuildSystemPrompt 根据模式生成提示词
 func BuildSystemPrompt(mode Mode, contextInfo string) string {
+	return BuildSystemPromptWithDir(mode, contextInfo, "")
+}
+
+// BuildSystemPromptWithDir includes the working directory in the prompt.
+func BuildSystemPromptWithDir(mode Mode, contextInfo, workDir string) string {
 	var sb strings.Builder
+
+	// Always include working directory
+	if workDir != "" {
+		sb.WriteString(fmt.Sprintf("Working directory: %s\n", workDir))
+	}
 
 	switch mode {
 	case ModeSelfIterate:
@@ -83,7 +94,13 @@ func BuildSystemPrompt(mode Mode, contextInfo string) string {
 	default:
 		sb.WriteString("You are PiGo — a coding agent in Go.\n")
 		sb.WriteString("Tools: read, write, edit, bash.\n")
-		sb.WriteString("Be concise. Use edit for changes.\n")
+		sb.WriteString("Be concise. Use edit, not write, for changes.\n\n")
+		sb.WriteString("## Rules\n")
+		sb.WriteString("- Read files ONLY once per turn — don't re-read unchanged files\n")
+		sb.WriteString("- After understanding the code, IMMEDIATELY propose and make edits\n")
+		sb.WriteString("- Don't read the same file twice in one response\n")
+		sb.WriteString("- If you're unsure how to proceed, ask the user instead of looping\n")
+		sb.WriteString("- Max 3 read calls per turn, then you MUST act or respond\n")
 		if contextInfo != "" {
 			sb.WriteString("\n## Project\n" + contextInfo + "\n")
 		}

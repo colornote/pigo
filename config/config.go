@@ -19,6 +19,7 @@ type Config struct {
 	SessionName   string // optional session display name
 	SessionPath   string // specific session file to load
 	Continue      bool   // continue latest session
+	AutoRepair    bool   // auto-trigger repair on error without asking
 }
 
 func Load() *Config {
@@ -35,6 +36,7 @@ func Load() *Config {
 		SystemPrompt:  loadSystemPrompt(home),
 		WorkDir:       getEnv("PIGO_WORKDIR", ""),
 		MaxTurns:      getEnvInt("PIGO_MAX_TURNS", 50),
+		AutoRepair:    getEnvBool("PIGO_AUTOREPAIR"),
 	}
 }
 
@@ -112,4 +114,9 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func getEnvBool(key string) bool {
+	v := strings.ToLower(os.Getenv(key))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }

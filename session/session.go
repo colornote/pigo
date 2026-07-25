@@ -154,12 +154,42 @@ func (m *Manager) LoadByID(cwd, idPrefix string) (*Session, error) {
 		return nil, fmt.Errorf("no sessions for project")
 	}
 
+	// 1. Search .jsonl files matching prefix
 	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
 		if strings.HasPrefix(e.Name(), idPrefix) && strings.HasSuffix(e.Name(), ".jsonl") {
 			return m.Load(filepath.Join(pDir, e.Name()))
 		}
 	}
-	return nil, fmt.Errorf("session %s not found", idPrefix)
+
+	// 2. Search subdirectories (old format: project-dir/session-id.jsonl)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		subDir := filepath.Join(pDir, e.Name())
+		subEntries, err := os.ReadDir(subDir)
+		if err != nil {
+			continue
+		}
+		for _, se := range subEntries {
+			if strings.HasPrefix(se.Name(), idPrefix) && strings.HasSuffix(se.Name(), ".jsonl") {
+				return m.Load(filepath.Join(subDir, se.Name()))
+			}
+		}
+	}
+
+	// 3. Match project directory name itself (e.g., the hash)
+	if strings.HasPrefix(filepath.Base(pDir), idPrefix) {
+		s, err := m.Latest(cwd)
+		if err == nil {
+			return s, nil
+		}
+	}
+
+	return nil, fmt.Errorf("session '%s' not found. Use /resume or -r to browse", idPrefix)
 }
 
 // Latest returns the most recently updated session for a project.
