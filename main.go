@@ -21,10 +21,7 @@ var ag *agent.Agent
 var startupCommandLine string
 
 // ESC interrupt support
-var (
-	escCancel context.CancelFunc
-	escDone  chan struct{}
-)
+var escDone chan struct{}
 
 // Local aliases for brevity (imported from agent package)
 const (
@@ -80,9 +77,13 @@ func main() {
 			goodbye()
 			return
 		case "--no-session":
+			// Capture current model/thinking before recreating agent
+			prevModel := ag.Model()
+			prevThinking := ag.Thinking()
 			cfg.NoSession = true
 			ag = agent.New(cfg)
-			ag.SetThinking(agent.ThinkingLevel(cfg.ThinkingLevel))
+			ag.SwitchModel(prevModel)
+			ag.SetThinking(prevThinking)
 		case "--name", "-n":
 			i++
 			if i < len(args) {
@@ -475,7 +476,7 @@ func startESCListener(cancel context.CancelFunc) {
 // If cancelled, prompts the user for a follow-up instruction.
 func runWithESC(input string) {
 	ctx, cancel := context.WithCancel(context.Background())
-	escCancel = cancel
+	defer cancel()
 	escDone = make(chan struct{})
 
 	// Switch to raw mode for ESC detection
@@ -503,6 +504,7 @@ func runWithESC(input string) {
 					fmt.Fprintf(os.Stderr, "%s", ANSIReset)
 					fmt.Printf("\n%s▸%s %s\n", ANSIGreen, ANSIReset, followUp)
 					// Re-run with follow-up appended as steering message
+					cancel() // cancel current ctx before recursive call
 					runWithESC(input + "\n\n[用户追加]" + followUp)
 					return
 				}
@@ -520,7 +522,7 @@ func runWithESC(input string) {
 
 func runSelf() {
 	ctx, cancel := context.WithCancel(context.Background())
-	escCancel = cancel
+	defer cancel()
 	escDone = make(chan struct{})
 
 	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
@@ -547,7 +549,7 @@ func runSelf() {
 
 func runRepair(desc string) {
 	ctx, cancel := context.WithCancel(context.Background())
-	escCancel = cancel
+	defer cancel()
 	escDone = make(chan struct{})
 
 	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))

@@ -33,16 +33,22 @@ const (
 	ThinkMax    ThinkingLevel = "max"
 )
 
-// DeepSeek 只有一个 base URL
-const DeepSeekBaseURL = "https://api.deepseek.com/anthropic"
-
 // DeepSeek 可用模型
 var DeepSeekModels = map[string]string{
 	"deepseek-v4-flash":    "V4 Flash — 快速",
 	"deepseek-v4-pro[1m]":  "V4 Pro 1M — 长上下文",
-	"deepseek-v4-pro":      "V4 Pro — 别名",
+	"deepseek-v4-pro":      "V4 Pro 1M — 别名 → v4-pro[1m]",
 	"deepseek-chat":        "Chat — 通用",
 	"deepseek-reasoner":    "Reasoner — 深度推理",
+}
+
+// NormalizeModel maps model aliases to their canonical API names.
+func NormalizeModel(name string) string {
+	switch name {
+	case "deepseek-v4-pro":
+		return "deepseek-v4-pro[1m]"
+	}
+	return name
 }
 
 // CoTModels lists models that support Chain-of-Thought streaming
@@ -109,9 +115,4 @@ func BuildSystemPromptWithDir(mode Mode, contextInfo, workDir string) string {
 	}
 
 	return sb.String()
-}
-
-// FormatModeStatus returns mode status line
-func FormatModeStatus(mode Mode, model string, thinking ThinkingLevel) string {
-	return fmt.Sprintf("[%s] model=%s thinking=%s", mode, model, thinking)
 }
