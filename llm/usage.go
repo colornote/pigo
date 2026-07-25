@@ -27,15 +27,21 @@ type ModelPricing struct {
 
 // ContextWindow maps model names to max context window size
 var ModelContextWindows = map[string]int{
-	"deepseek-v4-flash":   128_000,
-	"deepseek-chat":       128_000,
-	"deepseek-reasoner":   128_000,
+	"deepseek-v4-flash":    128_000,
+	"deepseek-chat":        128_000,
+	"deepseek-reasoner":    128_000,
+	"deepseek-v4-pro":     1_000_000,
 	"deepseek-v4-pro[1m]": 1_000_000,
 }
 
 // Pricing for DeepSeek models (USD per 1M tokens)
 var ModelPrices = map[string]ModelPricing{
 	"deepseek-v4-flash": {
+		InputPrice:  0.14,
+		OutputPrice: 0.28,
+		CacheHit:    0.014,
+	},
+	"deepseek-v4-pro": {
 		InputPrice:  0.14,
 		OutputPrice: 0.28,
 		CacheHit:    0.014,
