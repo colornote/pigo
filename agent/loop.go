@@ -12,7 +12,6 @@ import (
 	"pigo/session"
 	"pigo/tools"
 	"strings"
-	"time"
 )
 
 type Agent struct {
@@ -449,6 +448,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 }
 
 // runStandardLoop runs the tool-calling agent loop (non-CoT path).
+// Uses streaming API for real-time text display.
 func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 	for turn := 0; turn < a.cfg.MaxTurns; turn++ {
 		// Check for cancellation before each turn
@@ -472,29 +472,29 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 			Tools:     a.buildToolDefs(),
 		}
 
-		spinnerStop := make(chan bool)
-		spinnerDone := make(chan bool)
-		go showSpinner(spinnerStop, spinnerDone)
+		// Track streaming state
+		var (
+			textBuf  strings.Builder
+			toolUses []llm.ContentBlock
+		)
 
-		resp, err := a.client.SendWithContext(ctx, req)
+		onText := func(text string) {
+			fmt.Print(text)
+			textBuf.WriteString(text)
+		}
 
-		close(spinnerStop)
-		<-spinnerDone
+		onTool := func(name, id string) {
+			// Tools are arriving — handled after stream completes.
+		}
+
+		resp, err := a.client.SendStreamWithContext(ctx, req, onText, onTool)
 
 		if err != nil {
 			return "", fmt.Errorf("API: %w", err)
 		}
 
-		// Print text from response (non-streaming)
-		for _, block := range resp.Content {
-			if block.Type == "text" && block.Text != "" {
-				fmt.Print(block.Text)
-			}
-		}
-
-		toolUses := []llm.ContentBlock{}
+		// Collect text and tool_use blocks from the response
 		var textParts []string
-
 		for _, block := range resp.Content {
 			switch block.Type {
 			case "text":
@@ -505,6 +505,11 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		}
 
 		assistantText := strings.Join(textParts, "")
+
+		// Ensure clean separation after streamed text
+		if textBuf.Len() > 0 {
+			fmt.Println()
+		}
 
 		// Build assistant message and save
 		var assistantContent []interface{}
@@ -525,9 +530,6 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		a.saveEntry("assistant", string(assistantJSON), "")
 
 		if len(toolUses) == 0 {
-			if assistantText != "" {
-				fmt.Println()
-			}
 			a.Footer()
 			return assistantText, nil
 		}
@@ -610,8 +612,11 @@ func (a *Agent) runCoT(ctx context.Context, prompt string) (string, error) {
 		MaxTokens: thinkingTokens[a.thinking],
 	}
 
-	fmt.Printf("\n%s💭 思考链 · Chain of Thought%s\n", ANSICyan, ANSIReset)
-	fmt.Print(strings.Repeat("─", 50) + "\n")
+	// All CoT UI output goes to stderr so reasoning and content
+	// are interleaved correctly (stdout/stderr otherwise race).
+	sep := strings.Repeat("─", 50)
+	fmt.Fprintf(os.Stderr, "\n%s💭 思考链 · Chain of Thought%s\n", ANSICyan, ANSIReset)
+	fmt.Fprintf(os.Stderr, "%s\n", sep)
 
 	reasoningStarted := false
 	contentStarted := false
@@ -620,18 +625,20 @@ func (a *Agent) runCoT(ctx context.Context, prompt string) (string, error) {
 		func(reasoning string) {
 			if !reasoningStarted {
 				reasoningStarted = true
-				fmt.Fprintf(os.Stderr, "%s", ANSIGray)
+				fmt.Fprint(os.Stderr, ANSIGray)
 			}
 			fmt.Fprint(os.Stderr, reasoning)
 		},
 		func(content string) {
-			if reasoningStarted && !contentStarted {
+			if !contentStarted {
 				contentStarted = true
-				fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
-				fmt.Print(strings.Repeat("─", 50) + "\n")
-				fmt.Printf("%s💡 回答 · Answer%s\n", ANSIGreen, ANSIReset)
+				if reasoningStarted {
+					fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
+				}
+				fmt.Fprintf(os.Stderr, "%s\n", sep)
+				fmt.Fprintf(os.Stderr, "%s💡 回答 · Answer%s\n", ANSIGreen, ANSIReset)
 			}
-			fmt.Print(content)
+			fmt.Fprint(os.Stderr, content)
 		},
 	)
 
@@ -639,11 +646,12 @@ func (a *Agent) runCoT(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("CoT API: %w", err)
 	}
 
-	if !contentStarted && reasoningStarted {
+	// Close out any open formatting
+	if reasoningStarted && !contentStarted {
 		fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
-		fmt.Print(strings.Repeat("─", 50) + "\n")
+		fmt.Fprintf(os.Stderr, "%s\n", sep)
 	}
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 
 	a.Footer()
 	return finalContent, nil
@@ -975,18 +983,29 @@ func displayEditPreview(oldText, newText string) {
 		ANSIGreen, nl, ANSIReset)
 }
 
-// displayBashOutput prints command output with a gutter.
+// displayBashOutput prints command output with a clean gutter.
+// Lines are indented with a vertical bar; output is capped at 50 lines.
 func displayBashOutput(output string) {
 	lines := strings.Split(output, "\n")
 	limit := 50
-	if len(lines) > limit {
+	truncated := len(lines) > limit
+	if truncated {
 		lines = lines[:limit]
-		lines = append(lines, ANSIGray+"... (output truncated)"+ANSIReset)
 	}
 	for _, line := range lines {
-		// Trim trailing whitespace but keep structure
 		line = strings.TrimRight(line, " \t\r")
-		fmt.Fprintf(os.Stderr, "%s  │ %s%s\n", ANSIGray, line, ANSIReset)
+		// Replace control characters (except tab) with a dot
+		cleaned := strings.Map(func(r rune) rune {
+			if r < 32 && r != '\t' {
+				return '.'
+			}
+			return r
+		}, line)
+		fmt.Fprintf(os.Stderr, "%s  │%s %s\n", ANSIGray, ANSIReset, cleaned)
+	}
+	if truncated {
+		fmt.Fprintf(os.Stderr, "%s  │%s %s... (%d lines total, showing first %d)%s\n",
+			ANSIGray, ANSIReset, ANSIGray, len(lines)+1, limit, ANSIReset)
 	}
 }
 
@@ -1025,23 +1044,6 @@ func getTerminalSize() (int, int) {
 	var rows, cols int
 	fmt.Sscanf(string(out), "%d %d", &rows, &cols)
 	return cols, rows
-}
-
-func showSpinner(stop chan bool, done chan bool) {
-	chars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	i := 0
-	for {
-		select {
-		case <-stop:
-			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 20))
-			done <- true
-			return
-		default:
-			fmt.Fprintf(os.Stderr, "\r%s %sthinking...%s ", chars[i%len(chars)], ANSIGray, ANSIReset)
-			i++
-			time.Sleep(80 * time.Millisecond)
-		}
-	}
 }
 
 func formatTokens(n int) string {
