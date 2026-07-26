@@ -476,18 +476,35 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		var (
 			textBuf  strings.Builder
 			toolUses []llm.ContentBlock
+			firstToken bool
 		)
 
 		onText := func(text string) {
+			if !firstToken {
+				firstToken = true
+				// Clear the "thinking..." line
+				fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+			}
 			fmt.Print(text)
 			textBuf.WriteString(text)
 		}
 
 		onTool := func(name, id string) {
-			// Tools are arriving — handled after stream completes.
+			if !firstToken {
+				firstToken = true
+				fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+			}
 		}
 
+		// Show "thinking..." indicator on stderr while waiting
+		fmt.Fprintf(os.Stderr, "%s⏳ thinking...%s", ANSIGray, ANSIReset)
+
 		resp, err := a.client.SendStreamWithContext(ctx, req, onText, onTool)
+
+		// Clear thinking indicator if still showing
+		if !firstToken {
+			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+		}
 
 		if err != nil {
 			return "", fmt.Errorf("API: %w", err)

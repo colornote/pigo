@@ -23,10 +23,10 @@ type DSMessage struct {
 
 // DSRequest is a request to DeepSeek's native /v1/chat/completions
 type DSRequest struct {
-	Model    string      `json:"model"`
-	Messages []DSMessage `json:"messages"`
-	Stream   bool        `json:"stream"`
-	MaxTokens int        `json:"max_tokens,omitempty"`
+	Model     string      `json:"model"`
+	Messages  []DSMessage `json:"messages"`
+	Stream    bool        `json:"stream"`
+	MaxTokens int         `json:"max_tokens,omitempty"`
 }
 
 // DSDelta is the delta in a streaming chunk
@@ -73,8 +73,6 @@ func NewDeepSeekClient(apiKey, baseURL string) *DeepSeekClient {
 type CoTCallback func(reasoning string)
 
 // SendStream sends a streaming request and returns the final content.
-// onReasoning is called for each reasoning_content chunk (the CoT chain).
-// onContent is called for each normal content chunk.
 func (c *DeepSeekClient) SendStream(req *DSRequest, onReasoning CoTCallback, onContent func(string)) (string, error) {
 	return c.SendStreamWithContext(context.Background(), req, onReasoning, onContent)
 }
@@ -108,6 +106,7 @@ func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSReque
 
 	var fullContent strings.Builder
 	var fullReasoning strings.Builder
+	var inThink bool // true when we're inside a  reply  tag
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -128,17 +127,19 @@ func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSReque
 		}
 
 		for _, choice := range chunk.Choices {
+			// Explicit reasoning_content field (native DeepSeek CoT)
 			if choice.Delta.ReasoningContent != "" {
 				fullReasoning.WriteString(choice.Delta.ReasoningContent)
 				if onReasoning != nil {
 					onReasoning(choice.Delta.ReasoningContent)
 				}
 			}
+
+			// Regular content — may include inline  reply  tags
 			if choice.Delta.Content != "" {
-				fullContent.WriteString(choice.Delta.Content)
-				if onContent != nil {
-					onContent(choice.Delta.Content)
-				}
+				c.processDelta(choice.Delta.Content, &inThink,
+					&fullReasoning, &fullContent,
+					onReasoning, onContent)
 			}
 		}
 
@@ -157,4 +158,56 @@ func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSReque
 	}
 
 	return fullContent.String(), nil
+}
+
+// processDelta handles inline  reply  tags embedded in content deltas.
+// Some DeepSeek models emit reasoning by wrapping it in  reply tags
+// inside the regular content field instead of using reasoning_content.
+func (c *DeepSeekClient) processDelta(delta string, inThink *bool,
+	reasoning, content *strings.Builder,
+	onReasoning CoTCallback, onContent func(string)) {
+
+	rem := delta
+	for rem != "" {
+		if *inThink {
+			// Looking for  reply to end thinking
+			idx := strings.Index(rem, " reply")
+			if idx < 0 {
+				reasoning.WriteString(rem)
+				if onReasoning != nil {
+					onReasoning(rem)
+				}
+				return
+			}
+			if idx > 0 {
+				part := rem[:idx]
+				reasoning.WriteString(part)
+				if onReasoning != nil {
+					onReasoning(part)
+				}
+			}
+			*inThink = false
+			rem = rem[idx+len(" reply"):]
+			continue
+		}
+
+		// Not in think — look for 
+		idx := strings.Index(rem, "")
+		if idx < 0 {
+			content.WriteString(rem)
+			if onContent != nil {
+				onContent(rem)
+			}
+			return
+		}
+		if idx > 0 {
+			part := rem[:idx]
+			content.WriteString(part)
+			if onContent != nil {
+				onContent(part)
+			}
+		}
+		*inThink = true
+		rem = rem[idx+len(""):]
+	}
 }
