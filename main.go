@@ -248,10 +248,21 @@ func readInput(firstLine string, reader *bufio.Reader) string {
 	var lines []string
 	lines = append(lines, firstLine)
 
+	fd := int(os.Stdin.Fd())
+
 	for {
-		os.Stdin.SetReadDeadline(time.Now().Add(120 * time.Millisecond))
+		// If reader has no buffered data, poll fd with 120ms timeout
+		if reader.Buffered() == 0 {
+			var rset unix.FdSet
+			rset.Set(fd)
+			tv := unix.Timeval{Sec: 0, Usec: 120000}
+			n, err := unix.Select(fd+1, &rset, nil, nil, &tv)
+			if n <= 0 || err != nil {
+				break
+			}
+		}
+
 		line, err := reader.ReadString('\n')
-		os.Stdin.SetReadDeadline(time.Time{})
 		if err != nil {
 			break
 		}
@@ -509,15 +520,19 @@ func makeRawInputOnly(fd int) (*term.State, error) {
 // leaking into the next prompt and fixes the "extra Enter needed" bug.
 func stdinDrain(reader *bufio.Reader) {
 	reader.Reset(os.Stdin)
-	os.Stdin.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	// Drain leftover bytes from kernel tty buffer after raw→cooked transition
+	fd := int(os.Stdin.Fd())
 	buf := make([]byte, 4096)
 	for {
-		_, err := os.Stdin.Read(buf)
-		if err != nil {
-			break
+		var rset unix.FdSet
+		rset.Set(fd)
+		tv := unix.Timeval{Sec: 0, Usec: 50000}
+		n, _ := unix.Select(fd+1, &rset, nil, nil, &tv)
+		if n <= 0 {
+			return
 		}
+		os.Stdin.Read(buf)
 	}
-	os.Stdin.SetReadDeadline(time.Time{})
 }
 
 // startESCListener reads stdin byte-by-byte while in raw mode.
