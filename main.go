@@ -143,7 +143,7 @@ func main() {
 	// If there's a prompt on the CLI, dispatch it (non-interactive)
 	if len(promptParts) > 0 {
 		input := strings.Join(promptParts, " ")
-		dispatch(input)
+		dispatch(input, nil)
 		goodbye()
 		return
 	}
@@ -210,7 +210,7 @@ func runInteractive() {
 			if input == "" {
 				continue
 			}
-			dispatch(input)
+			dispatch(input, reader)
 			continue
 		}
 
@@ -222,7 +222,7 @@ func runInteractive() {
 			if input == "" {
 				continue
 			}
-			dispatch(input)
+			dispatch(input, reader)
 			continue
 		}
 
@@ -232,13 +232,13 @@ func runInteractive() {
 			if input == "" {
 				continue
 			}
-			dispatch(input)
+			dispatch(input, reader)
 			continue
 		}
 
 		// ── Normal input with paste detection ──
 		input := readInput(line, reader)
-		dispatch(input)
+		dispatch(input, reader)
 	}
 }
 
@@ -488,17 +488,36 @@ func showHelp() {
 // makeRawInputOnly puts stdin in raw mode for byte-by-byte reading,
 // but keeps output processing (OPOST/ONLCR) enabled so \n still maps
 // to \r\n — avoids the "staircase" indentation on macOS/Linux.
+// Also preserves IUTF8 for multi-byte character handling.
 func makeRawInputOnly(fd int) (*term.State, error) {
 	oldState, err := term.MakeRaw(fd)
 	if err != nil {
 		return nil, err
 	}
 	// Re-enable output post-processing: \n → \r\n
+	// Also preserve IUTF8 for multi-byte character backspace
 	if tios, err := unix.IoctlGetTermios(fd, termiosGet); err == nil {
 		tios.Oflag |= unix.OPOST | unix.ONLCR
+		tios.Iflag |= iutf8Flag
 		unix.IoctlSetTermios(fd, termiosSet, tios)
 	}
 	return oldState, nil
+}
+
+// stdinDrain resets the reader buffer and drains leftover bytes from stdin
+// after a raw→cooked terminal transition. Prevents stale input from
+// leaking into the next prompt and fixes the "extra Enter needed" bug.
+func stdinDrain(reader *bufio.Reader) {
+	reader.Reset(os.Stdin)
+	os.Stdin.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	buf := make([]byte, 4096)
+	for {
+		_, err := os.Stdin.Read(buf)
+		if err != nil {
+			break
+		}
+	}
+	os.Stdin.SetReadDeadline(time.Time{})
 }
 
 // startESCListener reads stdin byte-by-byte while in raw mode.
@@ -528,7 +547,7 @@ func startESCListener(cancel context.CancelFunc) {
 // runWithESC wraps an agent API call with ESC interrupt support.
 // Puts terminal in raw mode, listens for ESC/Ctrl+C, restores on return.
 // If cancelled, prompts the user for a follow-up instruction.
-func runWithESC(input string) {
+func runWithESC(input string, reader *bufio.Reader) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	escDone = make(chan struct{})
@@ -551,6 +570,9 @@ func runWithESC(input string) {
 		<-listenerDone
 		term.Restore(int(os.Stdin.Fd()), oldState)
 		os.Stdin.SetReadDeadline(time.Time{})
+		if reader != nil {
+			stdinDrain(reader)
+		}
 	}
 
 	if err != nil {
@@ -565,7 +587,7 @@ func runWithESC(input string) {
 					fmt.Printf("\n%s▸%s %s\n", ANSIGreen, ANSIReset, followUp)
 					// Re-run with follow-up appended as steering message
 					cancel() // cancel current ctx before recursive call
-					runWithESC(input + "\n\n[用户追加]" + followUp)
+					runWithESC(input+"\n\n[用户追加]"+followUp, reader)
 					return
 				}
 			}
@@ -580,7 +602,7 @@ func runWithESC(input string) {
 	_ = result
 }
 
-func runSelf() {
+func runSelf(reader *bufio.Reader) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	escDone = make(chan struct{})
@@ -603,6 +625,9 @@ func runSelf() {
 		<-listenerDone
 		term.Restore(int(os.Stdin.Fd()), oldState)
 		os.Stdin.SetReadDeadline(time.Time{})
+		if reader != nil {
+			stdinDrain(reader)
+		}
 	}
 
 	fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
@@ -613,7 +638,7 @@ func runSelf() {
 	}
 }
 
-func runRepair(desc string) {
+func runRepair(desc string, reader *bufio.Reader) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	escDone = make(chan struct{})
@@ -636,6 +661,9 @@ func runRepair(desc string) {
 		<-listenerDone
 		term.Restore(int(os.Stdin.Fd()), oldState)
 		os.Stdin.SetReadDeadline(time.Time{})
+		if reader != nil {
+			stdinDrain(reader)
+		}
 	}
 
 	fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
@@ -644,7 +672,7 @@ func runRepair(desc string) {
 	}
 }
 
-func dispatch(input string) {
+func dispatch(input string, reader *bufio.Reader) {
 	switch {
 	case input == "/quit" || input == "/exit":
 		goodbye()
@@ -719,7 +747,7 @@ func dispatch(input string) {
 		if result == "" {
 			fmt.Printf("%s  已取消%s\n", ANSIGray, ANSIReset)
 		} else {
-			dispatch(result)
+			dispatch(result, reader)
 		}
 
 	// ─── Session Commands ─────────────────────────────────────
@@ -758,17 +786,17 @@ func dispatch(input string) {
 		handleResume()
 
 	case input == "/self":
-		runSelf()
+		runSelf(reader)
 
 	case strings.HasPrefix(input, "/repair"):
 		desc := strings.TrimSpace(strings.TrimPrefix(input, "/repair "))
 		if desc == "" {
 			desc = "fix known issues"
 		}
-		runRepair(desc)
+		runRepair(desc, reader)
 
 	default:
-		runWithESC(input)
+		runWithESC(input, reader)
 	}
 }
 
