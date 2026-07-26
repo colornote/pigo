@@ -57,11 +57,12 @@ type Response struct {
 }
 
 type ContentBlock struct {
-	Type  string                 `json:"type"`
-	Text  string                 `json:"text,omitempty"`
-	ID    string                 `json:"id,omitempty"`
-	Name  string                 `json:"name,omitempty"`
-	Input map[string]interface{} `json:"input,omitempty"`
+	Type     string                 `json:"type"`
+	Text     string                 `json:"text,omitempty"`
+	Thinking string                 `json:"thinking,omitempty"`
+	ID       string                 `json:"id,omitempty"`
+	Name     string                 `json:"name,omitempty"`
+	Input    map[string]interface{} `json:"input,omitempty"`
 }
 
 type StreamEvent struct {
@@ -75,6 +76,8 @@ type StreamEvent struct {
 type StreamDelta struct {
 	Type        string `json:"type"`
 	Text        string `json:"text,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	Signature   string `json:"signature,omitempty"`
 	PartialJSON string `json:"partial_json,omitempty"`
 	StopReason  string `json:"stop_reason,omitempty"`
 }
@@ -133,11 +136,11 @@ func (c *Client) SendWithContext(ctx context.Context, req *Request) (*Response, 
 	return &result, nil
 }
 
-func (c *Client) SendStream(req *Request, onText func(string), onToolStart func(string, string)) (*Response, error) {
-	return c.SendStreamWithContext(context.Background(), req, onText, onToolStart)
+func (c *Client) SendStream(req *Request, onText func(string), onToolStart func(string, string), onThinking func(string)) (*Response, error) {
+	return c.SendStreamWithContext(context.Background(), req, onText, onToolStart, onThinking)
 }
 
-func (c *Client) SendStreamWithContext(ctx context.Context, req *Request, onText func(string), onToolStart func(string, string)) (*Response, error) {
+func (c *Client) SendStreamWithContext(ctx context.Context, req *Request, onText func(string), onToolStart func(string, string), onThinking func(string)) (*Response, error) {
 	req.Stream = true
 	if os.Getenv("PIGO_DEBUG") == "1" {
 		dbg, _ := json.MarshalIndent(req, "", "  ")
@@ -225,6 +228,15 @@ func (c *Client) SendStreamWithContext(ctx context.Context, req *Request, onText
 					if onText != nil {
 						onText(event.Delta.Text)
 					}
+				case "thinking_delta":
+					if event.Index < len(result.Content) {
+						result.Content[event.Index].Thinking += event.Delta.Thinking
+					}
+					if onThinking != nil {
+						onThinking(event.Delta.Thinking)
+					}
+				case "signature_delta":
+					// signature — internal, don't display
 				case "input_json_delta":
 					currentTool.inputJSON = append(currentTool.inputJSON, event.Delta.PartialJSON)
 				}

@@ -474,16 +474,36 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 
 		// Track streaming state
 		var (
-			textBuf  strings.Builder
-			toolUses []llm.ContentBlock
+			textBuf    strings.Builder
+			toolUses   []llm.ContentBlock
 			firstToken bool
+			inThinking bool
 		)
+
+		onThinking := func(thinking string) {
+			if !inThinking {
+				inThinking = true
+				// Clear "thinking..." indicator and show header
+				fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+				fmt.Fprintf(os.Stderr, "%s💭 思考中 · Thinking%s\n%s%s\n",
+					ANSICyan, ANSIReset,
+					ANSIGray, strings.Repeat("─", 50))
+			}
+			fmt.Fprint(os.Stderr, thinking)
+		}
 
 		onText := func(text string) {
 			if !firstToken {
 				firstToken = true
-				// Clear the "thinking..." line
-				fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+				if inThinking {
+					// Close thinking section
+					fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
+					fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("─", 50))
+					fmt.Fprintf(os.Stderr, "%s💡 回答 · Answer%s\n", ANSIGreen, ANSIReset)
+				} else {
+					// Clear the "thinking..." line
+					fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+				}
 			}
 			fmt.Print(text)
 			textBuf.WriteString(text)
@@ -492,18 +512,29 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		onTool := func(name, id string) {
 			if !firstToken {
 				firstToken = true
-				fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+				if inThinking {
+					fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
+					fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("─", 50))
+				} else {
+					fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+				}
 			}
 		}
 
 		// Show "thinking..." indicator on stderr while waiting
 		fmt.Fprintf(os.Stderr, "%s⏳ thinking...%s", ANSIGray, ANSIReset)
 
-		resp, err := a.client.SendStreamWithContext(ctx, req, onText, onTool)
+		resp, err := a.client.SendStreamWithContext(ctx, req, onText, onTool, onThinking)
 
 		// Clear thinking indicator if still showing
 		if !firstToken {
-			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+			if inThinking {
+				// Thinking was displayed but no text/tool followed — close thinking section
+				fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
+				fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("─", 50))
+			} else {
+				fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
+			}
 		}
 
 		if err != nil {
