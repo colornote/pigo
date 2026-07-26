@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"golang.org/x/sys/unix"
 )
 
 var ag *agent.Agent
@@ -447,6 +449,22 @@ func showHelp() {
 
 // ─── ESC Interrupt Support ─────────────────────────────────────
 
+// makeRawInputOnly puts stdin in raw mode for byte-by-byte reading,
+// but keeps output processing (OPOST/ONLCR) enabled so \n still maps
+// to \r\n — avoids the "staircase" indentation on macOS/Linux.
+func makeRawInputOnly(fd int) (*term.State, error) {
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return nil, err
+	}
+	// Re-enable output post-processing: \n → \r\n
+	if tios, err := unix.IoctlGetTermios(fd, termiosGet); err == nil {
+		tios.Oflag |= unix.OPOST | unix.ONLCR
+		unix.IoctlSetTermios(fd, termiosSet, tios)
+	}
+	return oldState, nil
+}
+
 // startESCListener reads stdin byte-by-byte while in raw mode.
 // On ESC or Ctrl+C, it cancels the context to interrupt the API call.
 func startESCListener(cancel context.CancelFunc) {
@@ -480,7 +498,7 @@ func runWithESC(input string) {
 	escDone = make(chan struct{})
 
 	// Switch to raw mode for ESC detection
-	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+	oldState, rawErr := makeRawInputOnly(int(os.Stdin.Fd()))
 	listenerDone := make(chan struct{})
 	if rawErr == nil {
 		go func() {
@@ -531,7 +549,7 @@ func runSelf() {
 	defer cancel()
 	escDone = make(chan struct{})
 
-	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+	oldState, rawErr := makeRawInputOnly(int(os.Stdin.Fd()))
 	listenerDone := make(chan struct{})
 	if rawErr == nil {
 		go func() {
@@ -564,7 +582,7 @@ func runRepair(desc string) {
 	defer cancel()
 	escDone = make(chan struct{})
 
-	oldState, rawErr := term.MakeRaw(int(os.Stdin.Fd()))
+	oldState, rawErr := makeRawInputOnly(int(os.Stdin.Fd()))
 	listenerDone := make(chan struct{})
 	if rawErr == nil {
 		go func() {
