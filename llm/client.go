@@ -134,6 +134,10 @@ func (c *Client) SendWithContext(ctx context.Context, req *Request) (*Response, 
 }
 
 func (c *Client) SendStream(req *Request, onText func(string), onToolStart func(string, string)) (*Response, error) {
+	return c.SendStreamWithContext(context.Background(), req, onText, onToolStart)
+}
+
+func (c *Client) SendStreamWithContext(ctx context.Context, req *Request, onText func(string), onToolStart func(string, string)) (*Response, error) {
 	req.Stream = true
 	if os.Getenv("PIGO_DEBUG") == "1" {
 		dbg, _ := json.MarshalIndent(req, "", "  ")
@@ -144,7 +148,7 @@ func (c *Client) SendStream(req *Request, onText func(string), onToolStart func(
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequest("POST", c.baseURL+"/v1/messages", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

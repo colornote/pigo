@@ -43,4 +43,4 @@ pigo/
 ## Known Issues to Fix
 - [x] Session auto-save on /quit (done)
 - [ ] Compaction (summarize long sessions) — needed for long-running agents
-- [ ] Handle SIGINT (Ctrl+C) gracefully in cooked mode (auto-save session)
+- [x] Handle SIGINT (Ctrl+C) gracefully in cooked mode (auto-save session — done via signal.Notify + goodbye)
