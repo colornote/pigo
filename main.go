@@ -25,6 +25,9 @@ var startupCommandLine string
 // ESC interrupt support
 var escDone chan struct{}
 
+// paste counter for compact display
+var pasteCount int
+
 // Local aliases for brevity (imported from agent package)
 const (
 	ANSIReset  = agent.ANSIReset
@@ -185,14 +188,15 @@ func runInteractive() {
 	fmt.Printf("\n%s  ESC → 打断+追加提示  │  \\ → 续行  │  \\e → 编辑器  │  ``` → 代码块  │  /multiline → 全屏编辑%s\n",
 		ANSIGray, ANSIReset)
 
-	scanner := bufio.NewScanner(os.Stdin)
+	reader := bufio.NewReaderSize(os.Stdin, 65536)
 	for {
 		fmt.Printf("\n%s▸%s ", ANSIGreen, ANSIReset)
-		if !scanner.Scan() {
+		line, err := reader.ReadString('\n')
+		if err != nil {
 			goodbye()
 			break
 		}
-		line := scanner.Text()
+		line = strings.TrimRight(line, "\r\n")
 		trimmed := strings.TrimSpace(line)
 
 		// Empty line — skip
@@ -202,7 +206,7 @@ func runInteractive() {
 
 		// ── Triple-backtick block mode ──
 		if trimmed == "```" {
-			input := readBacktickBlock(scanner)
+			input := readBacktickBlock(reader)
 			if input == "" {
 				continue
 			}
@@ -224,7 +228,7 @@ func runInteractive() {
 
 		// ── \ continuation: line-numbered multi-line ──
 		if strings.HasSuffix(trimmed, "\\") {
-			input := readContinuation(scanner, strings.TrimSuffix(trimmed, "\\"))
+			input := readContinuation(reader, strings.TrimSuffix(trimmed, "\\"))
 			if input == "" {
 				continue
 			}
@@ -232,25 +236,56 @@ func runInteractive() {
 			continue
 		}
 
-		// ── Normal single-line ──
-		dispatch(trimmed)
+		// ── Normal input with paste detection ──
+		input := readInput(line, reader)
+		dispatch(input)
 	}
+}
+
+// readInput reads a line and detects multi-line pastes via non-blocking poll.
+// Returns the joined input and prints a compact summary for pastes.
+func readInput(firstLine string, reader *bufio.Reader) string {
+	var lines []string
+	lines = append(lines, firstLine)
+
+	for {
+		os.Stdin.SetReadDeadline(time.Now().Add(120 * time.Millisecond))
+		line, err := reader.ReadString('\n')
+		os.Stdin.SetReadDeadline(time.Time{})
+		if err != nil {
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		lines = append(lines, line)
+	}
+
+	if len(lines) == 1 {
+		return firstLine
+	}
+
+	pasteCount++
+	fmt.Printf("%s[paste #%d +%d lines]%s\n", ANSIYellow, pasteCount, len(lines), ANSIReset)
+	return strings.Join(lines, "\n")
 }
 
 // readContinuation reads multi-line input with \ line continuations.
 // First line already had its trailing \ stripped.
-func readContinuation(scanner *bufio.Scanner, firstLine string) string {
+func readContinuation(reader *bufio.Reader, firstLine string) string {
 	var lines []string
 	lines = append(lines, strings.TrimSpace(firstLine))
 	lineNo := 2
 
 	for {
 		fmt.Printf("%s%2d│%s ", ANSIGray, lineNo, ANSIReset)
-		if !scanner.Scan() {
+		next, err := reader.ReadString('\n')
+		if err != nil {
 			goodbye()
 			os.Exit(0)
 		}
-		next := scanner.Text()
+		next = strings.TrimRight(next, "\r\n")
 		trimmed := strings.TrimSpace(next)
 
 		// Empty line in continuation: end the block
@@ -291,18 +326,19 @@ func readContinuation(scanner *bufio.Scanner, firstLine string) string {
 
 // readBacktickBlock reads a triple-backtick code block.
 // The opening ``` has already been consumed.
-func readBacktickBlock(scanner *bufio.Scanner) string {
+func readBacktickBlock(reader *bufio.Reader) string {
 	fmt.Printf("%s``` 代码块模式 — 再输入 ``` 结束%s\n", ANSIYellow, ANSIReset)
 	var lines []string
 	lineNo := 1
 
 	for {
 		fmt.Printf("%s%2d│%s ", ANSIGray, lineNo, ANSIReset)
-		if !scanner.Scan() {
+		next, err := reader.ReadString('\n')
+		if err != nil {
 			goodbye()
 			os.Exit(0)
 		}
-		next := scanner.Text()
+		next = strings.TrimRight(next, "\r\n")
 		trimmed := strings.TrimSpace(next)
 
 		if trimmed == "```" {
