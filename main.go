@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"pigo/agent"
 	"pigo/config"
 	"sort"
@@ -89,6 +91,9 @@ func main() {
 			ag = agent.New(cfg)
 			ag.SwitchModel(prevModel)
 			ag.SetThinking(prevThinking)
+		case "-p", "--print":
+			// Non-interactive: print response and exit (stdin is merged below)
+			cfg.Print = true
 		case "--name", "-n":
 			i++
 			if i < len(args) {
@@ -112,6 +117,11 @@ func main() {
 				ag.SetThinking(agent.ThinkingLevel(args[i]))
 			}
 		default:
+			if strings.HasPrefix(arg, "@") {
+				// @file argument: include file contents in the prompt (pi: `pi @file "msg"`)
+				promptParts = append(promptParts, fileArgPrompt(arg[1:]))
+				continue
+			}
 			if strings.HasPrefix(arg, "-") {
 				continue
 			}
@@ -140,10 +150,32 @@ func main() {
 		}
 	}
 
-	// If there's a prompt on the CLI, dispatch it (non-interactive)
+	// If there's a prompt on the CLI, dispatch it (non-interactive).
+	// Merge piped stdin into the prompt like pi -p does:
+	//   cat README.md | pigo -p "Summarize this text"
 	if len(promptParts) > 0 {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			if data, err := io.ReadAll(os.Stdin); err == nil {
+				if s := strings.TrimSpace(string(data)); s != "" {
+					promptParts = append(promptParts, "\n\n[stdin]\n"+s)
+				}
+			}
+		}
 		input := strings.Join(promptParts, " ")
 		dispatch(input, nil)
+		goodbye()
+		return
+	}
+
+	// Print mode with piped stdin only (no CLI args): stdin is the prompt.
+	if cfg.Print && !term.IsTerminal(int(os.Stdin.Fd())) {
+		data, err := io.ReadAll(os.Stdin)
+		if err == nil && strings.TrimSpace(string(data)) != "" {
+			dispatch(strings.TrimSpace(string(data)), nil)
+			goodbye()
+			return
+		}
+		fmt.Fprintf(os.Stderr, "%s✗ --print requires a prompt or piped stdin%s\n", ANSIRed, ANSIReset)
 		goodbye()
 		return
 	}
@@ -454,17 +486,21 @@ func goodbye() {
 
 func showHelp() {
 	fmt.Printf("%s🐹 PiGo%s — %spi in Go%s\n\n", ANSIBold, ANSIReset, ANSIGray, ANSIReset)
-	fmt.Printf("Usage: pigo [options] [prompt]\n\n")
+	fmt.Printf("Usage: pigo [options] [@files...] [prompt]\n\n")
 	fmt.Printf("%sOptions:%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("  --help, -h        Show this help\n")
 	fmt.Printf("  --version, -v     Show version\n")
 	fmt.Printf("  --model <name>    Set model for single-shot\n")
 	fmt.Printf("  --thinking <lvl>  Set thinking level\n")
+	fmt.Printf("  --print, -p       Non-interactive: print response and exit\n")
 	fmt.Printf("  --continue, -c    Continue most recent session\n")
 	fmt.Printf("  --resume, -r      Browse and select from past sessions\n")
 	fmt.Printf("  --session <id>    Load specific session by ID prefix\n")
 	fmt.Printf("  --name <name>     Set session display name\n")
 	fmt.Printf("  --no-session      Ephemeral mode (don't save)\n")
+	fmt.Printf("\n%sFile Arguments:%s\n", ANSICyan, ANSIReset)
+	fmt.Printf("  %s@file%s             Include file contents in the prompt\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %spiped stdin%s         cat file | pigo -p \"prompt\" merges stdin\n", ANSIYellow, ANSIReset)
 	fmt.Printf("\n%sInteractive Commands:%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("  %s/model <name>%s     Switch model\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/models%s           List available models\n", ANSIYellow, ANSIReset)
@@ -493,6 +529,28 @@ func showHelp() {
 	fmt.Printf("  pigo -r                        Browse old sessions\n")
 	fmt.Printf("  pigo --no-session \"query\"      Ephemeral one-shot\n")
 	fmt.Printf("  pigo --session abc123 \"query\"  Resume specific session\n")
+	fmt.Printf("  pigo @code.ts @test.ts \"Review\"  Include files in prompt\n")
+	fmt.Printf("  cat README.md | pigo -p \"Summarize\"  Non-interactive + stdin\n")
+}
+
+// fileArgPrompt loads a @file CLI argument and formats its contents for
+// inclusion in the prompt, mirroring pi's `pi @file "message"` behavior.
+func fileArgPrompt(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("[@%s: %v]", path, err)
+	}
+	// Binary/image files can't be inlined — reference the path so the
+	// model can read them with the read tool if needed.
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf":
+		return fmt.Sprintf("[@%s: binary file — use the read tool if needed]", path)
+	}
+	content := string(data)
+	if len(content) > 40000 {
+		content = content[:40000] + "\n...[truncated]"
+	}
+	return fmt.Sprintf("<file path=%q>\n%s\n</file>", path, content)
 }
 
 // ─── ESC Interrupt Support ─────────────────────────────────────

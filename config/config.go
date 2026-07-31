@@ -20,6 +20,7 @@ type Config struct {
 	SessionPath   string // specific session file to load
 	Continue      bool   // continue latest session
 	AutoRepair    bool   // auto-trigger repair on error without asking
+	Print         bool   // -p/--print: non-interactive, print response and exit
 }
 
 func Load() *Config {

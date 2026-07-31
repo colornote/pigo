@@ -34,6 +34,7 @@ pigo/
 - [x] External editor integration (`\e` suffix, `/multiline`)
 - [x] Git context auto-loading (branch, commits, status in system prompt)
 - [x] Multi-line input (`\` continuation, `\`\`\`` code blocks)
+- [x] Print mode (`-p`/`--print`) + `@file` CLI args + piped stdin merge
 
 ## Tools Policy
 - **7 tools: read, write, edit, bash, grep, find, ls**
