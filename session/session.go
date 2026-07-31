@@ -35,10 +35,10 @@ type Entry struct {
 type Session struct {
 	ID        string  `json:"id"`
 	Name      string  `json:"name,omitempty"`
-	Entries   []Entry `json:"-"`           // in-memory, not serialized to meta
-	FilePath  string  `json:"-"`           // JSONL file path
-	MetaPath  string  `json:"-"`           // sidecar meta file
-	Project   string  `json:"project"`     // slug for project
+	Entries   []Entry `json:"-"`       // in-memory, not serialized to meta
+	FilePath  string  `json:"-"`       // JSONL file path
+	MetaPath  string  `json:"-"`       // sidecar meta file
+	Project   string  `json:"project"` // slug for project
 	CreatedAt string  `json:"created_at"`
 	UpdatedAt string  `json:"updated_at"`
 }
