@@ -604,14 +604,22 @@ func startESCListener(cancel context.CancelFunc) {
 			return
 		default:
 		}
-		// Set short deadline so we can check escDone periodically
-		os.Stdin.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, err := os.Stdin.Read(buf[:])
-		if err != nil {
-			// Timeout or error — loop back to check escDone
+		// Poll stdin with select() so we can check escDone between keys.
+		// SetReadDeadline is a no-op on ttys (only sockets/pipes support it) —
+		// a bare Read would block forever and leak this goroutine every run.
+		fd := int(os.Stdin.Fd())
+		var rset unix.FdSet
+		rset.Set(fd)
+		tv := unix.Timeval{Sec: 0, Usec: 100000}
+		n, err := unix.Select(fd+1, &rset, nil, nil, &tv)
+		if err != nil || n == 0 {
+			continue // timeout or error — loop back to check escDone
+		}
+		n, err = os.Stdin.Read(buf[:])
+		if err != nil || n == 0 {
 			continue
 		}
-		if n > 0 && (buf[0] == 0x1b || buf[0] == 0x03) {
+		if buf[0] == 0x1b || buf[0] == 0x03 {
 			cancel()
 			return
 		}
@@ -939,11 +947,22 @@ func readKey(timeout time.Duration) string {
 		return "continue"
 	}
 	defer term.Restore(fd, oldState)
-	os.Stdin.SetReadDeadline(time.Now().Add(timeout))
-	defer os.Stdin.SetReadDeadline(time.Time{})
-	var buf [1]byte
-	n, err := os.Stdin.Read(buf[:])
+
+	// Wait for input with a real timeout via select(). SetReadDeadline is a
+	// no-op on ttys (only sockets/pipes support it) — a bare Read blocks
+	// forever, hanging the process at the repair prompt.
+	var rset unix.FdSet
+	rset.Set(fd)
+	tv := unix.Timeval{
+		Sec:  int64(timeout / time.Second),
+		Usec: int32((timeout % time.Second) / time.Microsecond),
+	}
+	n, err := unix.Select(fd+1, &rset, nil, nil, &tv)
 	if err != nil || n == 0 {
+		return "continue"
+	}
+	var buf [1]byte
+	if _, err := os.Stdin.Read(buf[:]); err != nil {
 		return "continue"
 	}
 	if buf[0] == 'r' || buf[0] == 'R' {
