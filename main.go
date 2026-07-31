@@ -166,7 +166,7 @@ func runInteractive() {
 	if s := ag.Session(); s != nil {
 		sid := s.ID
 		if len(sid) > 12 {
-			sid = sid[:12]
+			sid = truncate(sid, 12)
 		}
 		fmt.Printf("%s║%s  %sSession:%s %-28s %s║%s\n", ANSICyan, ANSIReset, ANSIGray, ANSIReset, sid, ANSICyan, ANSIReset)
 	} else if ag.IsEphemeral() {
@@ -930,8 +930,8 @@ func handleLoadSession(idPrefix string) {
 	for _, e := range entries[start:] {
 		prefix := fmt.Sprintf("%s[%s]%s", ANSIGray, e.Role[:4], ANSIReset)
 		content := e.Content
-		if len(content) > 100 {
-			content = content[:97] + "..."
+		if len([]rune(content)) > 100 {
+			content = truncate(content, 97) + "..."
 		}
 		fmt.Printf("%s %s\n", prefix, content)
 	}
@@ -965,9 +965,9 @@ func handleResume() {
 		}
 		firstMsg := ""
 		if len(s.Entries) > 0 {
-			firstMsg = s.Entries[0].Content
-			if len(firstMsg) > 50 {
-				firstMsg = firstMsg[:47] + "..."
+			firstMsg = truncate(s.Entries[0].Content, 50)
+			if len([]rune(firstMsg)) >= 50 {
+				firstMsg += "..."
 			}
 		}
 		fmt.Printf("%s %s %-10s %-20s %s\n", mark, id, name, truncate(s.UpdatedAt, 19), firstMsg)
@@ -976,12 +976,9 @@ func handleResume() {
 	fmt.Printf("\n%sType /load <id> to resume one%s\n", ANSIYellow, ANSIReset)
 }
 
-// truncate safely truncates string s to n chars.
+// truncate safely truncates string s to n runes (handles CJK/emoji).
 func truncate(s string, n int) string {
-	if len(s) < n {
-		return s
-	}
-	return s[:n]
+	return agent.TruncRunes(s, n)
 }
 
 func workDir() string {
@@ -990,8 +987,8 @@ func workDir() string {
 }
 
 func shorten(s string, n int) string {
-	if len(s) <= n {
+	if len([]rune(s)) <= n {
 		return s
 	}
-	return "..." + s[len(s)-n+3:]
+	return "..." + agent.TruncRunesRight(s, n-3)
 }

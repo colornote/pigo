@@ -12,6 +12,8 @@ import (
 	"pigo/session"
 	"pigo/tools"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 type Agent struct {
@@ -378,8 +380,8 @@ func (a *Agent) Footer() {
 	}
 
 	dir := a.cfg.WorkDir
-	if len(dir) > 24 {
-		dir = "…" + dir[len(dir)-23:]
+	if len([]rune(dir)) > 24 {
+		dir = "…" + TruncRunesRight(dir, 23)
 	}
 
 	// Session indicator
@@ -1210,14 +1212,15 @@ func lookupKeyFromEnv() string {
 
 // ─── Tool Display Helpers ──────────────────────────────────────
 
-// truncDisplay truncates a string for terminal display.
+// truncDisplay truncates a string for terminal display (rune-safe).
 func truncDisplay(s string, maxLen int) string {
 	// Take first line only for preview
 	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
 		s = s[:idx]
 	}
-	if len(s) > maxLen {
-		return s[:maxLen-3] + "..."
+	r := []rune(s)
+	if len(r) > maxLen {
+		return string(r[:maxLen-3]) + "..."
 	}
 	return s
 }
@@ -1286,15 +1289,37 @@ func toolArgPreview(tu llm.ContentBlock) string {
 }
 
 func getTerminalSize() (int, int) {
-	cmd := exec.Command("stty", "size")
-	cmd.Stdin = os.Stdin
-	out, err := cmd.Output()
+	// syscall-based — no subprocess spawn on every footer
+	cols, rows, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
 		return 0, 0
 	}
-	var rows, cols int
-	fmt.Sscanf(string(out), "%d %d", &rows, &cols)
 	return cols, rows
+}
+
+// TruncRunes truncates a string to at most n runes (not bytes), avoiding
+// cutting multi-byte UTF-8 characters (CJK, emoji) mid-sequence.
+func TruncRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+// TruncRunesRight keeps the last n runes of a string (rune-safe).
+func TruncRunesRight(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[len(r)-n:])
 }
 
 func formatTokens(n int) string {
