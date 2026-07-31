@@ -1,6 +1,6 @@
 module pigo
 
-go 1.21.13
+go 1.18
 
 require (
 	github.com/peterh/liner v1.2.2
