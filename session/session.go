@@ -250,6 +250,8 @@ func (m *Manager) List(cwd string) ([]Session, error) {
 // ─── Session Methods ───────────────────────────────────────────────
 
 // AddEntry appends a message entry and flushes to disk.
+// On flush failure the in-memory entry is rolled back so memory stays
+// consistent with what's on disk.
 func (s *Session) AddEntry(parentID, role, content string, toolUseID string) error {
 	e := Entry{
 		ID:        newEntryID(),
@@ -259,9 +261,16 @@ func (s *Session) AddEntry(parentID, role, content string, toolUseID string) err
 		ToolUseID: toolUseID,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
+	prevLen := len(s.Entries)
+	prevUpdated := s.UpdatedAt
 	s.Entries = append(s.Entries, e)
 	s.UpdatedAt = e.Timestamp
-	return s.Flush()
+	if err := s.Flush(); err != nil {
+		s.Entries = s.Entries[:prevLen]
+		s.UpdatedAt = prevUpdated
+		return err
+	}
+	return nil
 }
 
 // Flush writes all entries to the JSONL file.

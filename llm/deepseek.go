@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -80,6 +81,10 @@ func (c *DeepSeekClient) SendStream(req *DSRequest, onReasoning CoTCallback, onC
 // SendStreamWithContext is like SendStream but with context support for cancellation.
 func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSRequest, onReasoning CoTCallback, onContent func(string)) (string, error) {
 	req.Stream = true
+	if os.Getenv("PIGO_DEBUG") == "1" {
+		dbg, _ := json.MarshalIndent(req, "", "  ")
+		fmt.Fprintf(os.Stderr, "\n[DS REQUEST]\n%s\n", string(dbg))
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", fmt.Errorf("marshal: %w", err)

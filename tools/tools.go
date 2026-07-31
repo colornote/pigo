@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -173,7 +175,20 @@ func (t *EditTool) Execute(input map[string]interface{}) *Result {
 
 // ─── BashTool ────────────────────────────────────────────────────
 
-type BashTool struct{}
+// ANSI colors for the bash countdown display.
+const (
+	ansiGreen  = "\033[32m"
+	ansiYellow = "\033[33m"
+	ansiRed    = "\033[31m"
+	ansiGray   = "\033[90m"
+	ansiReset  = "\033[0m"
+)
+
+// BashTool executes a bash command with a timeout.
+// Set Ctx to the agent's run context so ESC/Ctrl+C can kill long commands.
+type BashTool struct {
+	Ctx context.Context
+}
 
 func (t *BashTool) Name() string        { return "bash" }
 func (t *BashTool) Description() string { return "Execute a bash command." }
@@ -198,11 +213,88 @@ func (t *BashTool) Execute(input map[string]interface{}) *Result {
 	if v, ok := input["timeout"].(float64); ok && v > 0 {
 		timeoutSec = int(v)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	baseCtx := t.Ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	// Run the child in its own process group so a timeout can kill the
+	// entire tree (bash + grandchildren). Without this, orphaned children
+	// inherit the stdout pipe and cmd.Wait() blocks until they exit —
+	// hanging the agent for minutes (e.g. `bash -c "echo hi; sleep 30"`).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Kill the whole process group when the context fires (timeout/cancel).
+	// Go's CommandContext only SIGKILLs the direct child.
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}()
+
+	// Live countdown: after a short grace period, show the remaining seconds
+	// until timeout on stderr, updating every second. Cleared on completion
+	// so the ✓/✗ status renders on a clean line.
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	shown := make(chan struct{})
+	if timeoutSec >= 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			// Grace period so fast commands don't flicker a status line.
+			select {
+			case <-done:
+				return
+			case <-time.After(3 * time.Second):
+			}
+			printTick := func(first bool) {
+				remaining := timeoutSec - int(time.Since(start).Seconds())
+				if remaining < 0 {
+					remaining = 0
+				}
+				color := ansiGreen
+				switch {
+				case remaining <= 5:
+					color = ansiRed
+				case remaining <= 10:
+					color = ansiYellow
+				}
+				prefix := "\r\x1b[2K"
+				if first {
+					prefix = "\n"
+				}
+				fmt.Fprintf(os.Stderr, "%s%s⏳ %s执行中 %s%2ds%s/%ds 后超时%s",
+					prefix, ansiGray, ansiReset, color, remaining, ansiReset, timeoutSec, ansiReset)
+			}
+			printTick(true)
+			close(shown)
+			for {
+				select {
+				case <-done:
+					return
+				case <-time.After(time.Second):
+					printTick(false)
+				}
+			}
+		}()
+	}
+
 	output, err := cmd.CombinedOutput()
+	close(done)
+	wg.Wait()
+
+	// Erase the countdown line so the ✓/✗ status and output render cleanly.
+	select {
+	case <-shown:
+		fmt.Fprint(os.Stderr, "\r\x1b[2K")
+	default:
+	}
+
 	outStr := string(output)
 	if len(outStr) > 50000 {
 		outStr = outStr[:50000] + "\n\n[Truncated]"
@@ -271,13 +363,12 @@ func (t *GrepTool) Execute(input map[string]interface{}) *Result {
 	if len(outStr) > 50000 {
 		outStr = outStr[:50000] + "\n\n[Truncated]"
 	}
-	// grep returns exit code 1 for "no matches"
+	// Exit code 1 = "no matches" (rg/grep convention); anything else (2) is a
+	// real error (bad path, invalid pattern) and must NOT be reported as a
+	// successful search.
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 && len(output) == 0 {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return &Result{Success: true, Output: "No matches found."}
-		}
-		if len(output) > 0 {
-			return &Result{Success: true, Output: outStr}
 		}
 		return &Result{Success: false, Output: outStr, Error: err.Error()}
 	}
@@ -329,10 +420,9 @@ func (t *FindTool) Execute(input map[string]interface{}) *Result {
 	if len(outStr) > 50000 {
 		outStr = outStr[:50000] + "\n\n[Truncated]"
 	}
+	// fd exits 1 on error (bad path); find exits 1 on error too. Never report
+	// an error message as a successful result.
 	if err != nil {
-		if len(output) > 0 {
-			return &Result{Success: true, Output: outStr}
-		}
 		return &Result{Success: false, Output: outStr, Error: err.Error()}
 	}
 	if outStr == "" {
