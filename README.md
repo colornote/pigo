@@ -51,7 +51,7 @@ PiGo is a single-binary reimplementation of [pi](https://pi.dev) — the minimal
 ### Option 1 — Build from source
 
 ```bash
-git clone https://github.com/<you>/pigo.git
+git clone https://github.com/colornote/pigo.git
 cd pigo
 make build          # → ./pigo
 sudo make install   # → /usr/local/bin/pigo
@@ -61,7 +61,7 @@ make install-local  # → $(go env GOPATH)/bin
 
 ### Option 2 — Download a release binary
 
-Grab the `pigo` binary for your platform from the [Releases](https://github.com/<you>/pigo/releases) page, put it on your `PATH`, and `chmod +x pigo`.
+Grab the `pigo` binary for your platform from the [Releases](https://github.com/colornote/pigo/releases) page, put it on your `PATH`, and `chmod +x pigo`.
 
 ---
 
