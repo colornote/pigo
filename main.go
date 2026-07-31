@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/peterh/liner"
 	"golang.org/x/term"
 
 	"golang.org/x/sys/unix"
@@ -27,8 +28,14 @@ var startupCommandLine string
 // ESC interrupt support
 var escDone chan struct{}
 
-// paste counter for compact display
-var pasteCount int
+const version = "v0.1.0"
+
+// origTermState captures the terminal state at startup so goodbye() can
+// restore it. liner.NewLiner() puts the tty in raw mode; the exit paths
+// (/quit, Ctrl+C, Ctrl+D, SIGINT) call os.Exit(0), which skips the deferred
+// ls.Close() that would restore the terminal. Without this, pigo leaves the
+// tty raw — no echo, Enter broken — and the next run appears to auto-exit.
+var origTermState *term.State
 
 // Local aliases for brevity (imported from agent package)
 const (
@@ -59,6 +66,14 @@ func main() {
 		os.Exit(0)
 	}()
 
+	// Capture the terminal state before anything (liner, raw mode) changes it,
+	// so goodbye() can always restore a clean terminal on exit.
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if st, err := term.GetState(int(os.Stdin.Fd())); err == nil {
+			origTermState = st
+		}
+	}
+
 	ag = agent.New(cfg)
 	ag.SetThinking(agent.ThinkingLevel(cfg.ThinkingLevel))
 
@@ -74,7 +89,7 @@ func main() {
 			goodbye()
 			return
 		case "--version", "-v":
-			fmt.Println("pigo v0.1.0 — pi in Go")
+			fmt.Println("pigo " + version + " — pi in Go")
 			goodbye()
 			return
 		case "--continue", "-c":
@@ -185,33 +200,45 @@ func main() {
 	goodbye()
 }
 
-func runInteractive() {
-	// Banner
-	fmt.Printf("%s╔══════════════════════════════════════════╗%s\n", ANSICyan, ANSIReset)
-	fmt.Printf("%s║%s  %s🐹 PiGo%s — %spi in Go%s              %s║%s\n",
-		ANSICyan, ANSIReset, ANSIBold, ANSIReset, ANSIGray, ANSIReset, ANSICyan, ANSIReset)
-	fmt.Printf("%s╠══════════════════════════════════════════╣%s\n", ANSICyan, ANSIReset)
-	fmt.Printf("%s║%s  %sModel:%s   %-30s %s║%s\n", ANSICyan, ANSIReset, ANSIGray, ANSIReset, ag.Model(), ANSICyan, ANSIReset)
-	fmt.Printf("%s║%s  %sThink:%s   %-30s %s║%s\n", ANSICyan, ANSIReset, ANSIGray, ANSIReset, ag.Thinking(), ANSICyan, ANSIReset)
-	fmt.Printf("%s║%s  %sDir:%s     %-30s %s║%s\n", ANSICyan, ANSIReset, ANSIGray, ANSIReset, shorten(workDir(), 30), ANSICyan, ANSIReset)
-	// Session info
+// printBanner renders the startup banner: a compact two-column info grid.
+// No box drawing — avoids CJK width misalignment entirely.
+func printBanner() {
+	model := ag.Model()
+	think := string(ag.Thinking())
+	dir := shorten(workDir(), 20)
+	sess := "(ephemeral)"
 	if s := ag.Session(); s != nil {
-		sid := s.ID
-		if len(sid) > 12 {
-			sid = truncate(sid, 12)
-		}
-		fmt.Printf("%s║%s  %sSession:%s %-28s %s║%s\n", ANSICyan, ANSIReset, ANSIGray, ANSIReset, sid, ANSICyan, ANSIReset)
+		sess = truncate(s.ID, 12)
 	} else if ag.IsEphemeral() {
-		fmt.Printf("%s║%s  %sSession:%s %s(ephemeral)%s         %s║%s\n", ANSICyan, ANSIReset, ANSIGray, ANSIReset, ANSIGray, ANSIReset, ANSICyan, ANSIReset)
+		sess = "(ephemeral)"
 	}
-	fmt.Printf("%s╠══════════════════════════════════════════╣%s\n", ANSICyan, ANSIReset)
-	fmt.Printf("%s║%s  %s/model  /thinking  /self  /repair%s   %s║%s\n",
-		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
-	fmt.Printf("%s║%s  %s/session /save  /load  /resume%s      %s║%s\n",
-		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
-	fmt.Printf("%s║%s  %s/mode   /multiline  /reload  /quit%s  %s║%s\n",
-		ANSICyan, ANSIReset, ANSIYellow, ANSIReset, ANSICyan, ANSIReset)
-	fmt.Printf("%s╚══════════════════════════════════════════╝%s\n", ANSICyan, ANSIReset)
+
+	// Two-column grid. Left column padded to a fixed display width so the
+	// right column starts at the same offset on every row (CJK-aware).
+	left := func(label, val string) string {
+		return agent.PadDisplay(fmt.Sprintf("%s  %s", label, val), 26)
+	}
+	right := func(label, val string) string {
+		return fmt.Sprintf("%s  %s", label, val)
+	}
+	lbl := func(s string) string { return fmt.Sprintf("%s%s%s", ANSIGray, s, ANSIReset) }
+	sep := fmt.Sprintf("%s%s%s", ANSIGray, strings.Repeat("─", 40), ANSIReset)
+	cmds := fmt.Sprintf("%s/model /thinking /self /repair%s  ·  %s/session /save /load /resume%s  ·  %s/mode /multiline /reload /quit%s",
+		ANSIYellow, ANSIReset, ANSIYellow, ANSIReset, ANSIYellow, ANSIReset)
+
+	fmt.Println()
+	fmt.Printf("  %sπ%s %sPiGo%s %s%s%s   %s·  pi in Go — coding agent%s\n",
+		ANSICyan, ANSIReset, ANSIBold, ANSIReset,
+		ANSIGray, version, ANSIReset, ANSIGray, ANSIReset)
+	fmt.Printf("  %s  %s\n", lbl(left("model", model)), right("dir", dir))
+	fmt.Printf("  %s  %s\n", lbl(left("think", think)), right("session", sess))
+	fmt.Println(sep)
+	fmt.Println(cmds)
+	fmt.Println()
+}
+
+func runInteractive() {
+	printBanner()
 
 	// Show footer on startup
 	ag.Footer()
@@ -220,11 +247,42 @@ func runInteractive() {
 	fmt.Printf("\n%s  ESC → 打断+追加提示  │  \\ → 续行  │  \\e → 编辑器  │  ``` → 代码块  │  /multiline → 全屏编辑%s\n",
 		ANSIGray, ANSIReset)
 
+	// Liner-based line editor: rune-safe backspace for CJK input
+	// (macOS termios lacks IUTF8 — cooked mode deletes bytes, corrupting
+	// multi-byte UTF-8. liner deletes whole glyphs and is cross-platform.)
+	ls := liner.NewLiner()
+	defer ls.Close()
+	ls.SetCtrlCAborts(true)
+	ls.SetTabCompletionStyle(liner.TabPrints)
+
+	// Persistent command history
+	home, _ := os.UserHomeDir()
+	histFile := filepath.Join(home, ".pigo", "history")
+	if f, err := os.Open(histFile); err == nil {
+		ls.ReadHistory(f)
+		f.Close()
+	}
+	defer func() {
+		if f, err := os.Create(histFile); err == nil {
+			ls.WriteHistory(f)
+			f.Close()
+		}
+	}()
+
+	// reader is kept for stdinDrain after raw-mode ESC interrupts
 	reader := bufio.NewReaderSize(os.Stdin, 65536)
 	for {
-		fmt.Printf("\n%s▸%s %s%s%s ", ANSIGreen, ANSIReset, ANSIGray, promptStatus(), ANSIReset)
-		line, err := reader.ReadString('\n')
+		// Prompt must be plain text — liner counts glyphs for cursor
+		// positioning, rejects control characters (incl. \n), and has no
+		// ANSI escape filtering. Print the separator ourselves.
+		fmt.Println()
+		line, err := ls.Prompt("▸ " + promptStatus() + " ")
 		if err != nil {
+			if err == liner.ErrPromptAborted || err == io.EOF {
+				goodbye()
+				os.Exit(0)
+			}
+			fmt.Fprintf(os.Stderr, "%s✗ input error: %v%s\n", ANSIRed, err, ANSIReset)
 			goodbye()
 			break
 		}
@@ -238,7 +296,7 @@ func runInteractive() {
 
 		// ── Triple-backtick block mode ──
 		if trimmed == "```" {
-			input := readBacktickBlock(reader)
+			input := readBacktickBlock(ls)
 			if input == "" {
 				continue
 			}
@@ -260,7 +318,7 @@ func runInteractive() {
 
 		// ── \ continuation: line-numbered multi-line ──
 		if strings.HasSuffix(trimmed, "\\") {
-			input := readContinuation(reader, strings.TrimSuffix(trimmed, "\\"))
+			input := readContinuation(ls, strings.TrimSuffix(trimmed, "\\"))
 			if input == "" {
 				continue
 			}
@@ -268,62 +326,24 @@ func runInteractive() {
 			continue
 		}
 
-		// ── Normal input with paste detection ──
-		input := readInput(line, reader)
-		dispatch(input, reader)
-	}
-}
-
-// readInput reads a line and detects multi-line pastes via non-blocking poll.
-// Returns the joined input and prints a compact summary for pastes.
-func readInput(firstLine string, reader *bufio.Reader) string {
-	var lines []string
-	lines = append(lines, firstLine)
-
-	fd := int(os.Stdin.Fd())
-
-	for {
-		// If reader has no buffered data, poll fd with 120ms timeout
-		if reader.Buffered() == 0 {
-			var rset unix.FdSet
-			rset.Set(fd)
-			tv := unix.Timeval{Sec: 0, Usec: 120000}
-			n, err := unix.Select(fd+1, &rset, nil, nil, &tv)
-			if n <= 0 || err != nil {
-				break
-			}
+		// Save non-trivial input to history
+		if !strings.HasPrefix(trimmed, "/") {
+			ls.AppendHistory(trimmed)
 		}
-
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			break
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break
-		}
-		lines = append(lines, line)
+		dispatch(trimmed, reader)
 	}
-
-	if len(lines) == 1 {
-		return firstLine
-	}
-
-	pasteCount++
-	fmt.Printf("%s[paste #%d +%d lines]%s\n", ANSIYellow, pasteCount, len(lines), ANSIReset)
-	return strings.Join(lines, "\n")
 }
 
 // readContinuation reads multi-line input with \ line continuations.
 // First line already had its trailing \ stripped.
-func readContinuation(reader *bufio.Reader, firstLine string) string {
+func readContinuation(ls *liner.State, firstLine string) string {
 	var lines []string
 	lines = append(lines, strings.TrimSpace(firstLine))
 	lineNo := 2
 
 	for {
-		fmt.Printf("%s%2d│%s ", ANSIGray, lineNo, ANSIReset)
-		next, err := reader.ReadString('\n')
+		fmt.Println()
+		next, err := ls.Prompt(fmt.Sprintf("%2d│ ", lineNo))
 		if err != nil {
 			goodbye()
 			os.Exit(0)
@@ -369,14 +389,14 @@ func readContinuation(reader *bufio.Reader, firstLine string) string {
 
 // readBacktickBlock reads a triple-backtick code block.
 // The opening ``` has already been consumed.
-func readBacktickBlock(reader *bufio.Reader) string {
+func readBacktickBlock(ls *liner.State) string {
 	fmt.Printf("%s``` 代码块模式 — 再输入 ``` 结束%s\n", ANSIYellow, ANSIReset)
 	var lines []string
 	lineNo := 1
 
 	for {
-		fmt.Printf("%s%2d│%s ", ANSIGray, lineNo, ANSIReset)
-		next, err := reader.ReadString('\n')
+		fmt.Println()
+		next, err := ls.Prompt(fmt.Sprintf("%2d│ ", lineNo))
 		if err != nil {
 			goodbye()
 			os.Exit(0)
@@ -466,6 +486,13 @@ func openEditor(seed string) string {
 }
 
 func goodbye() {
+	// Restore the terminal to its pre-pigo state. os.Exit() paths (/quit,
+	// Ctrl+C, Ctrl+D, SIGINT) skip the deferred liner.Close(), which is the
+	// only other place the tty gets restored — without this the terminal is
+	// left in raw mode and the shell/next pigo run misbehaves.
+	if origTermState != nil {
+		term.Restore(int(os.Stdin.Fd()), origTermState)
+	}
 	if ag != nil && !ag.IsEphemeral() {
 		// Auto-save session before exit
 		ag.SaveSession("")
@@ -577,15 +604,18 @@ func makeRawInputOnly(fd int) (*term.State, error) {
 // stdinDrain resets the reader buffer and drains leftover bytes from stdin
 // after a raw→cooked terminal transition. Prevents stale input from
 // leaking into the next prompt and fixes the "extra Enter needed" bug.
+// Bounded by a hard deadline so a continuous input flood (held key,
+// paste) can never block the UI forever.
 func stdinDrain(reader *bufio.Reader) {
 	reader.Reset(os.Stdin)
 	// Drain leftover bytes from kernel tty buffer after raw→cooked transition
 	fd := int(os.Stdin.Fd())
 	buf := make([]byte, 4096)
-	for {
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
 		var rset unix.FdSet
 		rset.Set(fd)
-		tv := unix.Timeval{Sec: 0, Usec: 50000}
+		tv := unix.Timeval{Sec: 0, Usec: 30000}
 		n, _ := unix.Select(fd+1, &rset, nil, nil, &tv)
 		if n <= 0 {
 			return
@@ -623,6 +653,24 @@ func startESCListener(cancel context.CancelFunc) {
 			cancel()
 			return
 		}
+		// Check immediately after consuming a byte: during a key flood the
+		// top-of-loop check is never reached until input stops, which would
+		// stall the close(escDone) handshake and freeze the UI after a run.
+		select {
+		case <-escDone:
+			return
+		default:
+		}
+	}
+}
+
+// waitListenerDone waits for the ESC listener to exit, with a safety timeout.
+// The listener drains stdin in 100ms select slices, so it must exit promptly;
+// a timeout here guards against a stray stall.
+func waitListenerDone(listenerDone <-chan struct{}) {
+	select {
+	case <-listenerDone:
+	case <-time.After(2 * time.Second):
 	}
 }
 
@@ -646,10 +694,61 @@ func runWithESC(input string, reader *bufio.Reader) {
 
 	result, err := ag.Run(ctx, input)
 
-	// Signal ESC listener to stop, wait for it, then restore terminal
+	// Signal ESC listener to stop and wait for it to exit.
 	if rawErr == nil {
 		close(escDone)
-		<-listenerDone
+		waitListenerDone(listenerDone)
+	}
+
+	if err == context.Canceled {
+		// ESC interrupt: restore the terminal to its ORIGINAL cooked state
+		// (captured at startup, before liner put the tty in raw mode).
+		// Restoring to oldState would go back to liner's raw mode, where
+		// Enter never completes a line — the follow-up prompt would hang.
+		restoreState := oldState
+		if origTermState != nil {
+			restoreState = origTermState
+		}
+		if rawErr == nil {
+			term.Restore(int(os.Stdin.Fd()), restoreState)
+			os.Stdin.SetReadDeadline(time.Time{})
+		}
+		fmt.Fprintf(os.Stderr, "\n%s⏎ 打断%s — 追加提示词 (回车跳过): %s", ANSIYellow, ANSIReset, ANSIGray)
+		// Read follow-up input in cooked mode (canonical: echo on, Enter
+		// completes the line). No stdinDrain here — the user often starts
+		// typing their follow-up the instant they press ESC, and a drain
+		// would swallow those keystrokes.
+		scanner := bufio.NewScanner(os.Stdin)
+		followUp := ""
+		if scanner.Scan() {
+			followUp = strings.TrimSpace(scanner.Text())
+		}
+		fmt.Fprintf(os.Stderr, "%s", ANSIReset)
+		if followUp != "" {
+			fmt.Printf("\n%s▸%s %s\n", ANSIGreen, ANSIReset, followUp)
+		}
+
+		// Return to liner's raw steady state before the next prompt/run.
+		// (liner only applies raw mode once in NewLiner — if we leave the
+		// tty cooked, the next Prompt would run with tty echo + liner echo
+		// doubling every keystroke.)
+		if rawErr == nil {
+			term.Restore(int(os.Stdin.Fd()), oldState)
+		}
+		if reader != nil {
+			stdinDrain(reader)
+		}
+
+		if followUp != "" {
+			// Re-run with follow-up appended as steering message
+			runWithESC(input+"\n\n[用户追加]"+followUp, reader)
+		}
+		return
+	}
+
+	// Normal completion or other error: restore to the pre-ESC state
+	// (liner's raw mode — the interactive loop expects it), then drain.
+	if rawErr == nil {
 		term.Restore(int(os.Stdin.Fd()), oldState)
 		os.Stdin.SetReadDeadline(time.Time{})
 		if reader != nil {
@@ -658,33 +757,19 @@ func runWithESC(input string, reader *bufio.Reader) {
 	}
 
 	if err != nil {
-		if err == context.Canceled {
-			fmt.Fprintf(os.Stderr, "\n%s⏎ 打断%s — 追加提示词 (回车跳过): %s", ANSIYellow, ANSIReset, ANSIGray)
-			// Read follow-up input in cooked mode
-			scanner := bufio.NewScanner(os.Stdin)
-			if scanner.Scan() {
-				followUp := strings.TrimSpace(scanner.Text())
-				if followUp != "" {
-					fmt.Fprintf(os.Stderr, "%s", ANSIReset)
-					fmt.Printf("\n%s▸%s %s\n", ANSIGreen, ANSIReset, followUp)
-					// Re-run with follow-up appended as steering message
-					cancel() // cancel current ctx before recursive call
-					runWithESC(input+"\n\n[用户追加]"+followUp, reader)
-					return
-				}
-			}
-			fmt.Fprintf(os.Stderr, "%s", ANSIReset)
-		} else {
-			fmt.Fprintf(os.Stderr, "\n%s✗ %v%s\n", ANSIRed, err, ANSIReset)
-			handleRunError(err)
-		}
+		fmt.Fprintf(os.Stderr, "\n%s✗ %v%s\n", ANSIRed, err, ANSIReset)
+		handleRunError(err)
 		return
 	}
 
 	_ = result
 }
 
-func runSelf(reader *bufio.Reader) {
+// runWithRawTerminal executes fn with stdin in raw mode and an active
+// ESC/Ctrl+C interrupt listener, then restores the terminal and drains
+// leftover input. Shared by /self and /repair (which both run agent
+// commands and rebuild afterwards).
+func runWithRawTerminal(reader *bufio.Reader, fn func(ctx context.Context)) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	escDone = make(chan struct{})
@@ -698,19 +783,25 @@ func runSelf(reader *bufio.Reader) {
 		}()
 	}
 
-	if err := ag.SelfIterate(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "%sError:%s %v\n", ANSIRed, ANSIReset, err)
-	}
+	fn(ctx)
 
 	if rawErr == nil {
 		close(escDone)
-		<-listenerDone
+		waitListenerDone(listenerDone)
 		term.Restore(int(os.Stdin.Fd()), oldState)
 		os.Stdin.SetReadDeadline(time.Time{})
 		if reader != nil {
 			stdinDrain(reader)
 		}
 	}
+}
+
+func runSelf(reader *bufio.Reader) {
+	runWithRawTerminal(reader, func(ctx context.Context) {
+		if err := ag.SelfIterate(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", ANSIRed, ANSIReset, err)
+		}
+	})
 
 	fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
 	if err := ag.Rebuild(); err != nil {
@@ -721,32 +812,11 @@ func runSelf(reader *bufio.Reader) {
 }
 
 func runRepair(desc string, reader *bufio.Reader) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	escDone = make(chan struct{})
-
-	oldState, rawErr := makeRawInputOnly(int(os.Stdin.Fd()))
-	listenerDone := make(chan struct{})
-	if rawErr == nil {
-		go func() {
-			startESCListener(cancel)
-			close(listenerDone)
-		}()
-	}
-
-	if err := ag.AutoRepair(ctx, desc); err != nil {
-		fmt.Fprintf(os.Stderr, "%sError:%s %v\n", ANSIRed, ANSIReset, err)
-	}
-
-	if rawErr == nil {
-		close(escDone)
-		<-listenerDone
-		term.Restore(int(os.Stdin.Fd()), oldState)
-		os.Stdin.SetReadDeadline(time.Time{})
-		if reader != nil {
-			stdinDrain(reader)
+	runWithRawTerminal(reader, func(ctx context.Context) {
+		if err := ag.AutoRepair(ctx, desc); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", ANSIRed, ANSIReset, err)
 		}
-	}
+	})
 
 	fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
 	if err := ag.Rebuild(); err != nil {
@@ -777,6 +847,22 @@ func dispatch(input string, reader *bufio.Reader) {
 			fmt.Printf(" %s %s %-28s %s\n", mark, cotTag, name, desc)
 		}
 		fmt.Printf("\n%s🧠 = 支持线上 CoT 思考链%s\n", ANSICyan, ANSIReset)
+
+	case input == "/model":
+		fmt.Printf("%sCurrent model:%s %s%s%s\n", ANSIBold, ANSIReset, ANSIGreen, ag.Model(), ANSIReset)
+		fmt.Printf("%sAvailable Models:%s\n", ANSIBold, ANSIReset)
+		for name, desc := range agent.DeepSeekModels {
+			mark := " "
+			if name == ag.Model() {
+				mark = "▶"
+			}
+			cotTag := "  "
+			if agent.CoTModels[name] {
+				cotTag = "🧠"
+			}
+			fmt.Printf(" %s %s %-28s %s\n", mark, cotTag, name, desc)
+		}
+		fmt.Printf("%sUse %s/model <name>%s to switch.%s\n", ANSICyan, ANSIYellow, ANSICyan, ANSIReset)
 
 	case strings.HasPrefix(input, "/model "):
 		name := strings.TrimSpace(strings.TrimPrefix(input, "/model "))

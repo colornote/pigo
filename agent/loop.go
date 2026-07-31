@@ -34,7 +34,7 @@ type Agent struct {
 
 func New(cfg *config.Config) *Agent {
 	client := llm.New(cfg.APIKey, cfg.BaseURL, cfg.Model)
-	dsClient := llm.NewDeepSeekClient(cfg.APIKey, "https://api.deepseek.com")
+	dsClient := llm.NewDeepSeekClient(cfg.APIKey, cfg.DSBaseURL)
 	reg := tools.NewRegistry()
 	reg.Register(&tools.ReadTool{})
 	reg.Register(&tools.WriteTool{})
@@ -59,12 +59,13 @@ func New(cfg *config.Config) *Agent {
 		registry:       reg,
 		messages:       []llm.Message{},
 		mode:           ModeNormal,
-		thinking:       ThinkingLevel(cfg.ThinkingLevel),
+		thinking:       ThinkMedium,
 		sessionMan:     sm,
 		noSession:      cfg.NoSession,
 		autoRepair:     cfg.AutoRepair,
 		messageIDs:     []string{},
 	}
+	a.SetThinking(ThinkingLevel(cfg.ThinkingLevel))
 	a.refreshGitContext()
 	return a
 }
@@ -75,7 +76,7 @@ func (a *Agent) SetAutoRepair(on bool)   { a.autoRepair = on }
 func (a *Agent) AutoRepairEnabled() bool { return a.autoRepair }
 
 func (a *Agent) SetThinking(level ThinkingLevel) {
-	if _, ok := map[ThinkingLevel]bool{ThinkOff: true, ThinkLow: true, ThinkMedium: true, ThinkHigh: true, ThinkMax: true}[level]; ok {
+	if validThinking[level] {
 		a.thinking = level
 	}
 }
@@ -630,6 +631,15 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 				fmt.Fprintf(os.Stderr, " %s%s%s", ANSIGray, argPreview, ANSIReset)
 			}
 
+			// Let ESC/Ctrl+C cancel propagate into the bash command so an
+			// interrupt kills long-running commands immediately (not just at
+			// the next turn boundary).
+			if tu.Name == "bash" {
+				if bt, ok := tool.(*tools.BashTool); ok {
+					bt.Ctx = ctx
+				}
+			}
+
 			result := tool.Execute(tu.Input)
 			resultJSON := result.Output
 
@@ -708,6 +718,15 @@ func (a *Agent) runCoT(ctx context.Context, prompt string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("CoT API: %w", err)
 	}
+
+	// Persist the completed turn so multi-turn CoT conversations retain
+	// the assistant's answer (otherwise only the user prompts accumulate
+	// and buildDSMessages sends history without replies).
+	a.messages = append(a.messages, llm.Message{
+		Role:    "assistant",
+		Content: []llm.TextContent{{Type: "text", Text: finalContent}},
+	})
+	a.saveEntry("assistant", finalContent, "")
 
 	// Close out any open formatting
 	if reasoningStarted && !contentStarted {
@@ -849,10 +868,23 @@ func (a *Agent) shouldAutoCompact() bool {
 
 // estimateTokens roughly estimates the token count of the message history
 // (chars/4 is a common approximation). Used only for compaction decisions.
+// Tool-result content is counted too — it is the largest token consumer in
+// tool-calling sessions and ignoring it delays compaction past the window.
 func (a *Agent) estimateTokens() int {
 	total := 0
 	for _, m := range a.messages {
-		total += len(extractTextContent(m.Content))
+		switch m.Role {
+		case "user":
+			if results := extractToolResults(m.Content); len(results) > 0 {
+				for _, r := range results {
+					total += len(r)
+				}
+			} else {
+				total += len(extractTextContent(m.Content))
+			}
+		default:
+			total += len(extractTextContent(m.Content))
+		}
 	}
 	return total / 4
 }
@@ -1082,7 +1114,7 @@ func (a *Agent) Reload() (string, error) {
 	if newAPIKey != "" && newAPIKey != a.cfg.APIKey {
 		a.cfg.APIKey = newAPIKey
 		a.client = llm.New(a.cfg.APIKey, a.cfg.BaseURL, a.cfg.Model)
-		a.deepseekClient = llm.NewDeepSeekClient(a.cfg.APIKey, "https://api.deepseek.com")
+		a.deepseekClient = llm.NewDeepSeekClient(a.cfg.APIKey, a.cfg.DSBaseURL)
 		reloaded = append(reloaded, "API credentials")
 	}
 
@@ -1346,4 +1378,9 @@ var thinkingTokens = map[ThinkingLevel]int{
 	ThinkMedium: 8192,
 	ThinkHigh:   16384,
 	ThinkMax:    32768,
+}
+
+// validThinking is the set of accepted thinking levels (used by SetThinking).
+var validThinking = map[ThinkingLevel]bool{
+	ThinkOff: true, ThinkLow: true, ThinkMedium: true, ThinkHigh: true, ThinkMax: true,
 }

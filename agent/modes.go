@@ -85,6 +85,9 @@ func BuildSystemPromptWithDir(mode Mode, contextInfo, workDir string) string {
 		sb.WriteString(fmt.Sprintf("Working directory: %s\n", workDir))
 	}
 
+	// CoT language instruction — reasoning output must be in Chinese
+	sb.WriteString("IMPORTANT: 启用思维链（Chain-of-Thought/CoT）推理时，思维过程必须用中文输出。\n\n")
+
 	switch mode {
 	case ModeSelfIterate:
 		sb.WriteString("**SELF-ITERATION MODE**\n\n")

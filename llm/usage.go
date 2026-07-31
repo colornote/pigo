@@ -27,7 +27,7 @@ type ModelPricing struct {
 
 // ContextWindow maps model names to max context window size
 var ModelContextWindows = map[string]int{
-	"deepseek-v4-flash":   128_000,
+	"deepseek-v4-flash":   1_000_000,
 	"deepseek-chat":       128_000,
 	"deepseek-reasoner":   128_000,
 	"deepseek-v4-pro":     1_000_000,

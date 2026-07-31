@@ -11,6 +11,7 @@ type Config struct {
 	APIKey        string
 	Model         string
 	BaseURL       string
+	DSBaseURL     string // native DeepSeek API (CoT/reasoner)
 	ThinkingLevel string
 	SystemPrompt  string
 	WorkDir       string
@@ -33,6 +34,7 @@ func Load() *Config {
 		APIKey:        lookupKey(),
 		Model:         getEnv("PIGO_MODEL", "deepseek-v4-flash"),
 		BaseURL:       getEnv("PIGO_BASE_URL", "https://api.deepseek.com/anthropic"),
+		DSBaseURL:     getEnv("PIGO_DS_BASE_URL", "https://api.deepseek.com"),
 		ThinkingLevel: getEnv("PIGO_THINKING", "medium"),
 		SystemPrompt:  loadSystemPrompt(home),
 		WorkDir:       getEnv("PIGO_WORKDIR", ""),
