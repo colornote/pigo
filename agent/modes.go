@@ -56,6 +56,21 @@ var CoTModels = map[string]bool{
 	"deepseek-reasoner": true,
 }
 
+// ShortModelName returns a compact display alias for a model (prompt status bar).
+func ShortModelName(model string) string {
+	switch {
+	case strings.Contains(model, "flash"):
+		return "flash"
+	case strings.Contains(model, "pro"):
+		return "v4pro"
+	case strings.Contains(model, "reasoner"):
+		return "reasoner"
+	case strings.Contains(model, "chat"):
+		return "chat"
+	}
+	return model
+}
+
 // BuildSystemPrompt 根据模式生成提示词
 func BuildSystemPrompt(mode Mode, contextInfo string) string {
 	return BuildSystemPromptWithDir(mode, contextInfo, "")

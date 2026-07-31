@@ -190,7 +190,7 @@ func runInteractive() {
 
 	reader := bufio.NewReaderSize(os.Stdin, 65536)
 	for {
-		fmt.Printf("\n%s▸%s ", ANSIGreen, ANSIReset)
+		fmt.Printf("\n%s▸%s %s%s%s ", ANSIGreen, ANSIReset, ANSIGray, promptStatus(), ANSIReset)
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			goodbye()
@@ -970,7 +970,7 @@ func handleResume() {
 				firstMsg += "..."
 			}
 		}
-		fmt.Printf("%s %s %-10s %-20s %s\n", mark, id, name, truncate(s.UpdatedAt, 19), firstMsg)
+		fmt.Printf("%s %s %s %s %s\n", mark, id, agent.PadDisplay(name, 20), truncate(s.UpdatedAt, 19), firstMsg)
 	}
 	fmt.Printf("%s╰─────────────────────────────────────%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("\n%sType /load <id> to resume one%s\n", ANSIYellow, ANSIReset)
@@ -984,6 +984,23 @@ func truncate(s string, n int) string {
 func workDir() string {
 	wd, _ := os.Getwd()
 	return wd
+}
+
+// promptStatus returns a compact model·thinking indicator for the prompt line.
+func promptStatus() string {
+	return agent.ShortModelName(ag.Model()) + "·" + shortThinking(string(ag.Thinking()))
+}
+
+func shortThinking(t string) string {
+	switch t {
+	case "low":
+		return "lo"
+	case "medium":
+		return "med"
+	case "high":
+		return "hi"
+	}
+	return t
 }
 
 func shorten(s string, n int) string {
