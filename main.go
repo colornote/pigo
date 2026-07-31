@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"pigo/agent"
 	"pigo/config"
+	"pigo/session"
 	"sort"
 	"strings"
 	"syscall"
@@ -99,13 +100,27 @@ func main() {
 			goodbye()
 			return
 		case "--no-session":
-			// Capture current model/thinking before recreating agent
-			prevModel := ag.Model()
-			prevThinking := ag.Thinking()
 			cfg.NoSession = true
-			ag = agent.New(cfg)
-			ag.SwitchModel(prevModel)
-			ag.SetThinking(prevThinking)
+			recreateAgent(cfg)
+		case "--api-key":
+			i++
+			if i < len(args) {
+				cfg.APIKey = args[i]
+				recreateAgent(cfg)
+			}
+		case "--session-dir":
+			i++
+			if i < len(args) {
+				cfg.SessionDir = args[i]
+				recreateAgent(cfg)
+			}
+		case "--no-context-files", "-nc":
+			cfg.NoContextFiles = true
+			cfg.LoadSystemPrompt()
+		case "--list-models":
+			printModels()
+			goodbye()
+			return
 		case "-p", "--print":
 			// Non-interactive: print response and exit (stdin is merged below)
 			cfg.Print = true
@@ -195,9 +210,28 @@ func main() {
 		return
 	}
 
+	// -p with no prompt and no piped stdin: error out instead of silently
+	// dropping into interactive mode (pi -p requires a prompt or stdin).
+	if cfg.Print && len(promptParts) == 0 {
+		fmt.Fprintf(os.Stderr, "%s✗ --print requires a prompt or piped stdin%s\n", ANSIRed, ANSIReset)
+		goodbye()
+		return
+	}
+
 	// Otherwise, interactive mode
 	runInteractive()
 	goodbye()
+}
+
+// recreateAgent rebuilds the agent after config-affecting flags change
+// (--no-session, --api-key, --session-dir), preserving the current
+// model and thinking level across the rebuild.
+func recreateAgent(cfg *config.Config) {
+	prevModel := ag.Model()
+	prevThinking := ag.Thinking()
+	ag = agent.New(cfg)
+	ag.SwitchModel(prevModel)
+	ag.SetThinking(prevThinking)
 }
 
 // printBanner renders the startup banner: a compact two-column info grid.
@@ -494,10 +528,12 @@ func goodbye() {
 		term.Restore(int(os.Stdin.Fd()), origTermState)
 	}
 	if ag != nil && !ag.IsEphemeral() {
-		// Auto-save session before exit
-		ag.SaveSession("")
-		s := ag.Session()
-		if s != nil {
+		// Auto-save session before exit — but only if one was actually
+		// created (i.e. at least one message exchanged). Without this
+		// check, --help/--version/--list-models and empty interactive
+		// sessions leave behind empty session files on every invocation.
+		if s := ag.Session(); s != nil {
+			ag.SaveSession("")
 			shortID := s.ID
 			if len(shortID) > 12 {
 				shortID = shortID[:12]
@@ -522,9 +558,13 @@ func showHelp() {
 	fmt.Printf("  --print, -p       Non-interactive: print response and exit\n")
 	fmt.Printf("  --continue, -c    Continue most recent session\n")
 	fmt.Printf("  --resume, -r      Browse and select from past sessions\n")
-	fmt.Printf("  --session <id>    Load specific session by ID prefix\n")
+	fmt.Printf("  --session <id>    Load specific session by ID prefix or .jsonl path\n")
+	fmt.Printf("  --session-dir <d> Custom session storage directory\n")
 	fmt.Printf("  --name <name>     Set session display name\n")
 	fmt.Printf("  --no-session      Ephemeral mode (don't save)\n")
+	fmt.Printf("  --no-context-files Disable AGENTS.md/CLAUDE.md loading (-nc)\n")
+	fmt.Printf("  --api-key <key>   Override API key (overrides env vars)\n")
+	fmt.Printf("  --list-models     List available models and exit\n")
 	fmt.Printf("\n%sFile Arguments:%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("  %s@file%s             Include file contents in the prompt\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %spiped stdin%s         cat file | pigo -p \"prompt\" merges stdin\n", ANSIYellow, ANSIReset)
@@ -540,6 +580,7 @@ func showHelp() {
 	fmt.Printf("  %s/multiline%s        Open editor for multi-line input\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/compact [instr]%s   Summarize old messages to free context\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/session%s          Show current session info\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/name <name>%s      Set session display name\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/save [name]%s      Save and name current session\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/load <id>%s        Load a session by ID prefix\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/resume%s           Browse and pick a session to resume\n", ANSIYellow, ANSIReset)
@@ -834,34 +875,11 @@ func dispatch(input string, reader *bufio.Reader) {
 		showHelp()
 
 	case input == "/models":
-		fmt.Printf("\n%sAvailable Models:%s\n", ANSIBold, ANSIReset)
-		for name, desc := range agent.DeepSeekModels {
-			mark := " "
-			if name == ag.Model() {
-				mark = "▶"
-			}
-			cotTag := "  "
-			if agent.CoTModels[name] {
-				cotTag = "🧠"
-			}
-			fmt.Printf(" %s %s %-28s %s\n", mark, cotTag, name, desc)
-		}
-		fmt.Printf("\n%s🧠 = 支持线上 CoT 思考链%s\n", ANSICyan, ANSIReset)
+		printModels()
 
 	case input == "/model":
 		fmt.Printf("%sCurrent model:%s %s%s%s\n", ANSIBold, ANSIReset, ANSIGreen, ag.Model(), ANSIReset)
-		fmt.Printf("%sAvailable Models:%s\n", ANSIBold, ANSIReset)
-		for name, desc := range agent.DeepSeekModels {
-			mark := " "
-			if name == ag.Model() {
-				mark = "▶"
-			}
-			cotTag := "  "
-			if agent.CoTModels[name] {
-				cotTag = "🧠"
-			}
-			fmt.Printf(" %s %s %-28s %s\n", mark, cotTag, name, desc)
-		}
+		printModels()
 		fmt.Printf("%sUse %s/model <name>%s to switch.%s\n", ANSICyan, ANSIYellow, ANSICyan, ANSIReset)
 
 	case strings.HasPrefix(input, "/model "):
@@ -931,6 +949,27 @@ func dispatch(input string, reader *bufio.Reader) {
 		}
 
 	// ─── Session Commands ─────────────────────────────────────
+	case strings.HasPrefix(input, "/name "):
+		name := strings.TrimSpace(strings.TrimPrefix(input, "/name "))
+		s := ag.Session()
+		if s == nil {
+			if ag.IsEphemeral() {
+				fmt.Printf("%s✗ ephemeral mode — no session%s\n", ANSIRed, ANSIReset)
+			} else {
+				fmt.Printf("%s✗ no active session — send a message or /save first%s\n", ANSIRed, ANSIReset)
+			}
+			return
+		}
+		if name == "" {
+			fmt.Printf("%sCurrent session name:%s %s\n", ANSIGray, ANSIReset, s.Name)
+			return
+		}
+		if err := ag.SaveSession(name); err != nil {
+			fmt.Printf("%s✗ %v%s\n", ANSIRed, err, ANSIReset)
+			return
+		}
+		fmt.Printf("%s✓ Session named %s%s%s%s\n", ANSIGreen, ANSIReset, ANSIBold, name, ANSIReset)
+
 	case input == "/session":
 		s := ag.Session()
 		if s == nil {
@@ -1072,7 +1111,15 @@ func handleContinue() {
 }
 
 func handleLoadSession(idPrefix string) {
-	s, err := ag.SessionManager().LoadByID(workDir(), idPrefix)
+	var s *session.Session
+	var err error
+	// --session <path|id> / /load: a full .jsonl path (or anything path-like)
+	// loads directly; otherwise treat it as an ID prefix within the project.
+	if strings.HasSuffix(idPrefix, ".jsonl") || strings.Contains(idPrefix, "/") {
+		s, err = ag.SessionManager().Load(idPrefix)
+	} else {
+		s, err = ag.SessionManager().LoadByID(workDir(), idPrefix)
+	}
 	if err != nil {
 		fmt.Printf("%s✗ Session '%s' not found%s\n", ANSIRed, idPrefix, ANSIReset)
 		return
@@ -1164,6 +1211,24 @@ func shortThinking(t string) string {
 		return "hi"
 	}
 	return t
+}
+
+// printModels lists available models with the active one marked.
+// Shared by /models, /model, and --list-models.
+func printModels() {
+	fmt.Printf("\n%sAvailable Models:%s\n", ANSIBold, ANSIReset)
+	for name, desc := range agent.DeepSeekModels {
+		mark := " "
+		if name == ag.Model() {
+			mark = "▶"
+		}
+		cotTag := "  "
+		if agent.CoTModels[name] {
+			cotTag = "🧠"
+		}
+		fmt.Printf(" %s %s %-28s %s\n", mark, cotTag, name, desc)
+	}
+	fmt.Printf("\n%s🧠 = 支持线上 CoT 思考链%s\n", ANSICyan, ANSIReset)
 }
 
 func shorten(s string, n int) string {

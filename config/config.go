@@ -8,20 +8,34 @@ import (
 )
 
 type Config struct {
-	APIKey        string
-	Model         string
-	BaseURL       string
-	DSBaseURL     string // native DeepSeek API (CoT/reasoner)
-	ThinkingLevel string
-	SystemPrompt  string
-	WorkDir       string
-	MaxTurns      int
-	NoSession     bool   // ephemeral mode
-	SessionName   string // optional session display name
-	SessionPath   string // specific session file to load
-	Continue      bool   // continue latest session
-	AutoRepair    bool   // auto-trigger repair on error without asking
-	Print         bool   // -p/--print: non-interactive, print response and exit
+	APIKey         string
+	Model          string
+	BaseURL        string
+	DSBaseURL      string // native DeepSeek API (CoT/reasoner)
+	ThinkingLevel  string
+	SystemPrompt   string
+	WorkDir        string
+	MaxTurns       int
+	NoSession      bool   // ephemeral mode
+	SessionName    string // optional session display name
+	SessionPath    string // specific session file to load
+	SessionDir     string // --session-dir: custom session storage directory
+	NoContextFiles bool   // -nc/--no-context-files: skip AGENTS.md/CLAUDE.md
+	Continue       bool   // continue latest session
+	AutoRepair     bool   // auto-trigger repair on error without asking
+	Print          bool   // -p/--print: non-interactive, print response and exit
+}
+
+// LoadSystemPrompt re-derives the system prompt from context files.
+// main.go calls it after CLI flags (-nc/--no-context-files) are parsed so
+// the flag and config.Load() ordering doesn't matter.
+func (c *Config) LoadSystemPrompt() {
+	home, _ := os.UserHomeDir()
+	if c.NoContextFiles {
+		c.SystemPrompt = "You are PiGo. Use read/write/edit/bash."
+		return
+	}
+	c.SystemPrompt = loadSystemPrompt(home)
 }
 
 func Load() *Config {

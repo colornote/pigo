@@ -44,11 +44,15 @@ func New(cfg *config.Config) *Agent {
 	reg.Register(&tools.GrepTool{})
 	reg.Register(&tools.FindTool{})
 
-	// Session manager rooted at ~/.pigo/sessions
+	// Session manager rooted at ~/.pigo/sessions, overridable via
+	// PIGO_SESSION_DIR env var or the --session-dir CLI flag.
 	home, _ := os.UserHomeDir()
 	sessDir := filepath.Join(home, ".pigo", "sessions")
 	if d := os.Getenv("PIGO_SESSION_DIR"); d != "" {
 		sessDir = d
+	}
+	if cfg.SessionDir != "" {
+		sessDir = cfg.SessionDir
 	}
 	sm := session.NewManager(sessDir)
 
@@ -104,9 +108,14 @@ func (a *Agent) IsEphemeral() bool { return a.noSession }
 func (a *Agent) SessionManager() *session.Manager { return a.sessionMan }
 
 // InitSession creates a new session for this agent.
+// An empty name falls back to the --name/-n CLI value so `pigo --name "task"`
+// names the first session it creates.
 func (a *Agent) InitSession(name string) error {
 	if a.noSession {
 		return nil
+	}
+	if name == "" {
+		name = a.cfg.SessionName
 	}
 	s, err := a.sessionMan.Create(a.cfg.WorkDir, name)
 	if err != nil {
@@ -1091,11 +1100,13 @@ func (a *Agent) Reload() (string, error) {
 	home, _ := os.UserHomeDir()
 	var reloaded []string
 
-	// 1. Re-read AGENTS.md / CLAUDE.md context files
-	newCtx := loadContextFiles(home)
-	if newCtx != a.cfg.SystemPrompt {
-		a.cfg.SystemPrompt = newCtx
-		reloaded = append(reloaded, "context files (AGENTS.md/CLAUDE.md/docs)")
+	// 1. Re-read AGENTS.md / CLAUDE.md context files (skipped with -nc)
+	if !a.cfg.NoContextFiles {
+		newCtx := loadContextFiles(home)
+		if newCtx != a.cfg.SystemPrompt {
+			a.cfg.SystemPrompt = newCtx
+			reloaded = append(reloaded, "context files (AGENTS.md/CLAUDE.md/docs)")
+		}
 	}
 
 	// 2. Re-register tools (in case new tools were added)
