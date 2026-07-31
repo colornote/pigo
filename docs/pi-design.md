@@ -35,6 +35,14 @@ pigo/
 - [x] Git context auto-loading (branch, commits, status in system prompt)
 - [x] Multi-line input (`\` continuation, `\`\`\`` code blocks)
 - [x] Print mode (`-p`/`--print`) + `@file` CLI args + piped stdin merge
+- [x] `--session-dir <dir>` — custom session storage directory (CLI override of `PIGO_SESSION_DIR`)
+- [x] `--api-key <key>` — override API key (overrides env vars)
+- [x] `--no-context-files`/`-nc` — disable AGENTS.md/CLAUDE.md loading
+- [x] `--list-models` — list available models and exit
+- [x] `/name <name>` — set session display name (`--name`/`-n` at startup now actually names the first session)
+- [x] `--session <path|id>` — full `.jsonl` path support (not just ID prefix)
+- [x] `-p` with no prompt/stdin errors instead of silently entering interactive mode
+- [x] `goodbye()` no longer creates an empty session on `--help`/`--version`/`--list-models`
 
 ## Tools Policy
 - **7 tools: read, write, edit, bash, grep, find, ls**
