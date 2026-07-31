@@ -53,7 +53,7 @@ PiGo 是 [pi](https://pi.dev)（极简终端编码工具）的纯 Go 单二进�
 ### 方式一：从源码构建
 
 ```bash
-git clone https://github.com/<你的用户名>/pigo.git
+git clone https://github.com/colornote/pigo.git
 cd pigo
 make build          # → ./pigo
 sudo make install   # → /usr/local/bin/pigo
@@ -63,7 +63,7 @@ make install-local  # → $(go env GOPATH)/bin
 
 ### 方式二：下载发布版二进制
 
-从 [Releases](https://github.com/<你的用户名>/pigo/releases) 页面下载对应平台的 `pigo` 二进制，放到你的 `PATH` 中并 `chmod +x pigo`。
+从 [Releases](https://github.com/colornote/pigo/releases) 页面下载对应平台的 `pigo` 二进制，放到你的 `PATH` 中并 `chmod +x pigo`。
 
 ---
 
