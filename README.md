@@ -11,6 +11,8 @@
 
 PiGo is a single-binary reimplementation of [pi](https://pi.dev) — the minimal terminal coding harness — in pure Go. It keeps pi's philosophy (a small tool loop of `read` / `write` / `edit` / `bash`, sessions, compaction, self-iteration) but drops the Node.js runtime entirely.
 
+> **[中文版 README](README.zh-CN.md)** · English
+
 ## 为什么有 PiGo / Why PiGo
 
 | | |
