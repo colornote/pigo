@@ -1090,10 +1090,7 @@ func readKey(timeout time.Duration) string {
 	// forever, hanging the process at the repair prompt.
 	var rset unix.FdSet
 	rset.Set(fd)
-	tv := unix.Timeval{
-		Sec:  int64(timeout / time.Second),
-		Usec: int32((timeout % time.Second) / time.Microsecond),
-	}
+	tv := unix.NsecToTimeval(timeout.Nanoseconds())
 	n, err := unix.Select(fd+1, &rset, nil, nil, &tv)
 	if err != nil || n == 0 {
 		return "continue"
