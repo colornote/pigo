@@ -94,6 +94,17 @@ func (a *Agent) SwitchModel(name string) {
 	a.deepseekClient.TotalUsage = llm.Usage{}
 }
 
+// SetAPIKey updates the API key on the running agent's clients without
+// touching the session, message history, model, or thinking level.
+// Used by /login so the new key takes effect immediately.
+func (a *Agent) SetAPIKey(key string) {
+	a.cfg.APIKey = key
+	a.client = llm.New(key, a.cfg.BaseURL, a.cfg.Model)
+	a.deepseekClient = llm.NewDeepSeekClient(key, a.cfg.DSBaseURL)
+	a.client.TotalUsage = llm.Usage{}
+	a.deepseekClient.TotalUsage = llm.Usage{}
+}
+
 func (a *Agent) Model() string { return a.cfg.Model }
 
 // ─── Session Management ──────────────────────────────────────────

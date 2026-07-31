@@ -285,6 +285,7 @@ func runInteractive() {
 	// (macOS termios lacks IUTF8 — cooked mode deletes bytes, corrupting
 	// multi-byte UTF-8. liner deletes whole glyphs and is cross-platform.)
 	ls := liner.NewLiner()
+	promptLiner = ls // global ref for /login etc.
 	defer ls.Close()
 	ls.SetCtrlCAborts(true)
 	ls.SetTabCompletionStyle(liner.TabPrints)
@@ -569,6 +570,8 @@ func showHelp() {
 	fmt.Printf("  %s@file%s             Include file contents in the prompt\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %spiped stdin%s         cat file | pigo -p \"prompt\" merges stdin\n", ANSIYellow, ANSIReset)
 	fmt.Printf("\n%sInteractive Commands:%s\n", ANSICyan, ANSIReset)
+	fmt.Printf("  %s/login%s             Select provider, paste API key (saves to ~/.pigo/.env)\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/logout%s            Remove stored API key\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/model <name>%s     Switch model\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/models%s           List available models\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/thinking <lvl>%s   Set thinking: off/low/medium/high/max\n", ANSIYellow, ANSIReset)
@@ -870,6 +873,15 @@ func dispatch(input string, reader *bufio.Reader) {
 	case input == "/quit" || input == "/exit":
 		goodbye()
 		os.Exit(0)
+
+	case input == "/login":
+		handleLogin()
+		if reader != nil {
+			stdinDrain(reader) // swallow keystrokes typed during verification
+		}
+
+	case input == "/logout":
+		handleLogout()
 
 	case input == "/help":
 		showHelp()

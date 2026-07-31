@@ -43,6 +43,7 @@ pigo/
 - [x] `--session <path|id>` — full `.jsonl` path support (not just ID prefix)
 - [x] `-p` with no prompt/stdin errors instead of silently entering interactive mode
 - [x] `goodbye()` no longer creates an empty session on `--help`/`--version`/`--list-models`
+- [x] `/login` / `/logout` — pick provider → paste API key → verify against native API (`GET /models`) → persist to `~/.pigo/.env` (0600) → hot-apply via `agent.SetAPIKey()` (session/messages/model untouched). DeepSeek only for now; provider registry in `agent/providers.go` is extensible.
 
 ## Tools Policy
 - **7 tools: read, write, edit, bash, grep, find, ls**
