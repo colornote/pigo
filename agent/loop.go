@@ -391,32 +391,24 @@ func (a *Agent) Footer() {
 		if len(sessID) > 8 {
 			sessID = sessID[:8]
 		}
-		sessIndicator = fmt.Sprintf(" · %ssession %s%s", ANSIGray, sessID, ANSIReset)
+		sessIndicator = " · session " + sessID
 	}
-	// Build footer line
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%sDeepSeek %s%s | %sthink:%s%s | %s%s%s%s | %s◫ %s%s/%s %s(%.1f%%) AC%s",
-		ANSIBold, displayModel, ANSIReset,
-		ANSIGray, ANSIReset, thinking,
-		ANSIGray, ANSIReset, dir,
-		sessIndicator,
-		ANSIGray, ANSIReset,
-		formatTokens(usage.InputTokens),
-		formatTokens(ctxWindow),
-		ANSIGray, pct, ANSIReset,
-	))
-
+	// Build footer as colored segments for CJK-aware width truncation.
+	segs := []colorSeg{
+		{fmt.Sprintf("DeepSeek %s", displayModel), ANSIBold},
+		{" | ", ANSIGray},
+		{fmt.Sprintf("think:%s", thinking), ANSIGray},
+		{" | ", ANSIGray},
+		{dir, ANSIGray},
+		{sessIndicator, ANSIGray},
+		{" | ", ANSIGray},
+		{fmt.Sprintf("◫ %s/%s (%.1f%%) AC", formatTokens(usage.InputTokens), formatTokens(ctxWindow), pct), ANSIGray},
+	}
 	cacheTotal := usage.CacheHitTokens + usage.CacheWriteTokens
 	if cacheTotal > 0 {
-		sb.WriteString(fmt.Sprintf(" %s|%s cache in: %s", ANSIGray, ANSIReset, formatBytes(cacheTotal*4)))
+		segs = append(segs, colorSeg{fmt.Sprintf(" | cache in: %s", formatBytes(cacheTotal*4)), ANSIGray})
 	}
-
-	sb.WriteString(fmt.Sprintf(" %s|%s %s$%.2f%s",
-		ANSIGray, ANSIReset,
-		ANSIYellow, cost, ANSIReset,
-	))
-
-	footerLine := sb.String()
+	segs = append(segs, colorSeg{fmt.Sprintf(" | $%.2f", cost), ANSIYellow})
 
 	// Always print inline — avoids cursor-positioning issues
 	// across different terminals (some don't support \033[s/\033[u)
@@ -426,7 +418,7 @@ func (a *Agent) Footer() {
 		w = 60
 	}
 	fmt.Fprint(os.Stderr, "\n")
-	fmt.Fprintf(os.Stderr, "%s%s%s\n%s\n", ANSIGray, strings.Repeat("─", w), ANSIReset, footerLine)
+	fmt.Fprintf(os.Stderr, "%s%s%s\n%s\n", ANSIGray, strings.Repeat("─", w), ANSIReset, renderSegs(segs, termWidth))
 
 }
 
