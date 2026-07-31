@@ -1,9 +1,6 @@
 # Binary
 pigo
 
-# Scratch / sibling project (own module, not part of pigo)
-vpn-client/
-
 # Environment (contains API keys)
 .env
 
