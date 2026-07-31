@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -63,5 +64,43 @@ func TestExplicitNameOverridesConfig(t *testing.T) {
 	}
 	if a.Session().Name != "explicit" {
 		t.Errorf("session name: expected 'explicit', got %q", a.Session().Name)
+	}
+}
+
+// TestSetAPIKeyPreservesSession verifies /login's hot key update keeps the
+// active session, message history, model, and thinking level intact.
+func TestSetAPIKeyPreservesSession(t *testing.T) {
+	dir := t.TempDir()
+	a := New(newTestConfig(dir, ""))
+	a.SetThinking(ThinkHigh)
+	if err := a.InitSession(""); err != nil {
+		t.Fatalf("InitSession: %v", err)
+	}
+	if a.Session() == nil {
+		t.Fatal("expected a session")
+	}
+	a.Run(context.Background(), "hi") // no API call happens — key empty is fine, but messages get appended
+	msgCount := len(a.messages)
+	oldClient := a.client
+
+	a.SetAPIKey("sk-new-key")
+
+	if a.Session() == nil {
+		t.Fatal("session lost after SetAPIKey")
+	}
+	if a.cfg.APIKey != "sk-new-key" {
+		t.Errorf("cfg.APIKey: expected sk-new-key, got %q", a.cfg.APIKey)
+	}
+	if len(a.messages) != msgCount {
+		t.Errorf("message history changed: %d → %d", msgCount, len(a.messages))
+	}
+	if a.Model() != "deepseek-v4-flash" {
+		t.Errorf("model changed: %q", a.Model())
+	}
+	if a.Thinking() != ThinkHigh {
+		t.Errorf("thinking changed: %q", a.Thinking())
+	}
+	if a.client == oldClient {
+		t.Error("client not rebuilt with new key")
 	}
 }
