@@ -24,9 +24,9 @@ type Agent struct {
 	thinking       ThinkingLevel
 	session        *session.Session
 	sessionMan     *session.Manager
-	noSession      bool // ephemeral mode — don't save
-	autoRepair     bool // auto-trigger repair on error
-	gitContext     string // cached git project context
+	noSession      bool     // ephemeral mode — don't save
+	autoRepair     bool     // auto-trigger repair on error
+	gitContext     string   // cached git project context
 	messageIDs     []string // parallel IDs for messages ↔ session entries
 }
 
@@ -67,10 +67,10 @@ func New(cfg *config.Config) *Agent {
 	return a
 }
 
-func (a *Agent) SetMode(mode Mode)           { a.mode = mode }
-func (a *Agent) Mode() Mode                  { return a.mode }
-func (a *Agent) SetAutoRepair(on bool)        { a.autoRepair = on }
-func (a *Agent) AutoRepairEnabled() bool      { return a.autoRepair }
+func (a *Agent) SetMode(mode Mode)       { a.mode = mode }
+func (a *Agent) Mode() Mode              { return a.mode }
+func (a *Agent) SetAutoRepair(on bool)   { a.autoRepair = on }
+func (a *Agent) AutoRepairEnabled() bool { return a.autoRepair }
 
 func (a *Agent) SetThinking(level ThinkingLevel) {
 	if _, ok := map[ThinkingLevel]bool{ThinkOff: true, ThinkLow: true, ThinkMedium: true, ThinkHigh: true, ThinkMax: true}[level]; ok {
@@ -164,6 +164,16 @@ func (a *Agent) ResumeSession(s *session.Session) error {
 					},
 				})
 			}
+		case "compaction":
+			flushToolResults()
+			// A compaction summary of earlier conversation: re-inject it as
+			// a user message so the model retains context of what happened.
+			a.messages = append(a.messages, llm.Message{
+				Role: "user",
+				Content: []llm.TextContent{
+					{Type: "text", Text: "[Compacted summary of earlier conversation]\n" + entry.Content},
+				},
+			})
 		case "tool":
 			// Batch tool results: they'll be flushed together as one user message
 			// when the next non-tool entry arrives.
@@ -417,6 +427,7 @@ func (a *Agent) Footer() {
 	fmt.Fprintf(os.Stderr, "%s%s%s\n%s\n", ANSIGray, strings.Repeat("─", w), ANSIReset, footerLine)
 
 }
+
 // ─── Core Run Loop ──────────────────────────────────────────────
 
 func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
@@ -424,6 +435,16 @@ func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 	// This handles the case where the user types a message while
 	// the agent's last response had pending tool calls.
 	a.cleanOrphanToolUses()
+
+	// Auto-compact when the conversation approaches the context limit.
+	if a.shouldAutoCompact() {
+		fmt.Fprintf(os.Stderr, "%s🧹 Context at capacity — compacting...%s\n", ANSIYellow, ANSIReset)
+		if err := a.Compact(ctx, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "%s⚠ compact failed: %v%s\n", ANSIYellow, err, ANSIReset)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s✓ Context compacted — earlier messages summarized%s\n", ANSIGreen, ANSIReset)
+		}
+	}
 
 	// Init session on first message
 	if !a.noSession && a.session == nil {
@@ -728,6 +749,189 @@ func (a *Agent) SaveSession(name string) error {
 	return a.session.WriteMeta()
 }
 
+// ─── Compaction ────────────────────────────────────────────────
+
+// Compact summarizes older messages into a single summary message while
+// keeping a recent tail verbatim, freeing context window space. The summary
+// is recorded as a "compaction" session entry so it survives resume.
+func (a *Agent) Compact(ctx context.Context, customInstr string) error {
+	const keep = 8 // recent messages retained verbatim
+
+	if len(a.messages) <= keep+2 {
+		return fmt.Errorf("conversation too short to compact (need more than %d messages, have %d)", keep+2, len(a.messages))
+	}
+
+	cut := len(a.messages) - keep
+
+	// Advance the cut point so the retained tail never starts with orphaned
+	// tool_result blocks (their tool_use was summarized away).
+	for cut < len(a.messages) && isToolResultMessage(a.messages[cut]) {
+		cut++
+	}
+	if cut == len(a.messages) {
+		return fmt.Errorf("cannot compact: no safe cut point")
+	}
+
+	old := a.messages[:cut]
+	tail := a.messages[cut:]
+	transcript := a.renderTranscript(old)
+
+	instr := customInstr
+	if instr == "" {
+		instr = "Preserve key decisions, file paths, commands, and unresolved issues."
+	}
+
+	req := &llm.Request{
+		Model:     a.cfg.Model,
+		MaxTokens: 2048,
+		System:    "You are a meticulous conversation summarizer for a coding agent.",
+		Messages: []llm.Message{
+			{
+				Role: "user",
+				Content: []llm.TextContent{{
+					Type: "text",
+					Text: fmt.Sprintf(
+						"Summarize the following coding-agent conversation.\n\n%s\n\n"+
+							"Write a concise summary that preserves:\n"+
+							"- The overall task and goal\n"+
+							"- Files read, created, and modified\n"+
+							"- Commands run and their outcomes\n"+
+							"- Key decisions and rationale\n"+
+							"- Current state and what remains to be done\n\n"+
+							"%s\n\nSummary:",
+						transcript, instr),
+				}},
+			},
+		},
+	}
+
+	resp, err := a.client.SendWithContext(ctx, req)
+	if err != nil {
+		return fmt.Errorf("summarize: %w", err)
+	}
+
+	summary := ""
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			summary += block.Text
+		}
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return fmt.Errorf("summarize: empty summary returned")
+	}
+
+	// Rebuild the message list: summary message + retained tail.
+	newMessages := []llm.Message{
+		{
+			Role: "user",
+			Content: []llm.TextContent{{
+				Type: "text",
+				Text: "[Compacted summary of earlier conversation]\n" + summary,
+			}},
+		},
+	}
+	newMessages = append(newMessages, tail...)
+	a.messages = newMessages
+
+	// Record the compaction in the session so it survives resume.
+	a.saveEntry("compaction", summary, "")
+
+	return nil
+}
+
+// shouldAutoCompact reports whether the conversation should be summarized
+// before the next turn because it is approaching the context window limit.
+func (a *Agent) shouldAutoCompact() bool {
+	if len(a.messages) < 14 {
+		return false
+	}
+	window := llm.GetContextWindow(a.cfg.Model)
+	if window <= 0 {
+		return false
+	}
+	return a.estimateTokens() > int(float64(window)*0.85)
+}
+
+// estimateTokens roughly estimates the token count of the message history
+// (chars/4 is a common approximation). Used only for compaction decisions.
+func (a *Agent) estimateTokens() int {
+	total := 0
+	for _, m := range a.messages {
+		total += len(extractTextContent(m.Content))
+	}
+	return total / 4
+}
+
+// renderTranscript renders messages as a compact text transcript for
+// summarization. Tool results are truncated to keep the prompt small.
+func (a *Agent) renderTranscript(msgs []llm.Message) string {
+	var sb strings.Builder
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			if results := extractToolResults(m.Content); len(results) > 0 {
+				for _, r := range results {
+					sb.WriteString(fmt.Sprintf("[tool result] %s\n", truncateForSummary(r, 300)))
+				}
+			} else {
+				sb.WriteString(fmt.Sprintf("[user] %s\n", extractTextContent(m.Content)))
+			}
+		case "assistant":
+			text := extractTextContent(m.Content)
+			if text != "" {
+				sb.WriteString(fmt.Sprintf("[assistant] %s\n", text))
+			}
+			for _, id := range collectToolUseIDs(m.Content) {
+				sb.WriteString(fmt.Sprintf("[tool call: %s]\n", id))
+			}
+		}
+	}
+	s := sb.String()
+	if len(s) > 60000 {
+		s = s[:60000] + "\n...[transcript truncated]"
+	}
+	return s
+}
+
+// isToolResultMessage reports whether the message is a user message that
+// contains tool_result blocks.
+func isToolResultMessage(m llm.Message) bool {
+	if m.Role != "user" {
+		return false
+	}
+	return len(collectToolResultIDs(m.Content)) > 0
+}
+
+// extractToolResults returns the content strings of tool_result blocks.
+func extractToolResults(content interface{}) []string {
+	list, _ := content.([]interface{})
+	var out []string
+	for _, block := range list {
+		switch b := block.(type) {
+		case map[string]interface{}:
+			if t, _ := b["type"].(string); t == "tool_result" {
+				if c, ok := b["content"].(string); ok {
+					out = append(out, c)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// truncateForSummary truncates a string for inclusion in a summary prompt.
+func truncateForSummary(s string, maxLen int) string {
+	// Take first line only for compactness
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		s = s[:idx]
+	}
+	if len(s) > maxLen {
+		return s[:maxLen-3] + "..."
+	}
+	return s
+}
+
 // ─── Helpers ───────────────────────────────────────────────────
 
 func (a *Agent) buildDSMessages(currentPrompt string) []llm.DSMessage {
@@ -836,7 +1040,7 @@ If it fails, fix errors. Summarize changes.`, strings.Join(srcFiles, "\n"))
 func (a *Agent) AutoRepair(ctx context.Context, bugDesc string) error {
 	a.SetMode(ModeAutoRepair)
 	fmt.Println("🔧 Auto-Repair Mode — fixing:", bugDesc)
-	return a.RunCommand(ctx, "Bug report: " + bugDesc + "\n\nFix it and rebuild.")
+	return a.RunCommand(ctx, "Bug report: "+bugDesc+"\n\nFix it and rebuild.")
 }
 
 func (a *Agent) Rebuild() error {
@@ -963,7 +1167,6 @@ func (a *Agent) refreshGitContext() {
 
 	a.gitContext = strings.Join(parts, "\n\n")
 }
-
 
 func loadContextFiles(home string) string {
 	var parts []string

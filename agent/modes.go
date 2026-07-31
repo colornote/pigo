@@ -35,11 +35,11 @@ const (
 
 // DeepSeek 可用模型
 var DeepSeekModels = map[string]string{
-	"deepseek-v4-flash":    "V4 Flash — 快速",
-	"deepseek-v4-pro[1m]":  "V4 Pro 1M — 长上下文",
-	"deepseek-v4-pro":      "V4 Pro 1M — 别名 → v4-pro[1m]",
-	"deepseek-chat":        "Chat — 通用",
-	"deepseek-reasoner":    "Reasoner — 深度推理",
+	"deepseek-v4-flash":   "V4 Flash — 快速",
+	"deepseek-v4-pro[1m]": "V4 Pro 1M — 长上下文",
+	"deepseek-v4-pro":     "V4 Pro 1M — 别名 → v4-pro[1m]",
+	"deepseek-chat":       "Chat — 通用",
+	"deepseek-reasoner":   "Reasoner — 深度推理",
 }
 
 // NormalizeModel maps model aliases to their canonical API names.

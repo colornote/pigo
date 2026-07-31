@@ -31,8 +31,8 @@ func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]Tool)}
 }
 
-func (r *Registry) Register(t Tool)         { r.tools[t.Name()] = t }
-func (r *Registry) Get(name string) Tool     { return r.tools[name] }
+func (r *Registry) Register(t Tool)      { r.tools[t.Name()] = t }
+func (r *Registry) Get(name string) Tool { return r.tools[name] }
 func (r *Registry) List() []Tool {
 	var out []Tool
 	for _, t := range r.tools {
@@ -221,8 +221,10 @@ func (t *BashTool) Execute(input map[string]interface{}) *Result {
 // GrepTool searches files for a pattern.
 type GrepTool struct{}
 
-func (t *GrepTool) Name() string        { return "grep" }
-func (t *GrepTool) Description() string { return "Search for a pattern in files. Uses ripgrep if available, grep otherwise." }
+func (t *GrepTool) Name() string { return "grep" }
+func (t *GrepTool) Description() string {
+	return "Search for a pattern in files. Uses ripgrep if available, grep otherwise."
+}
 
 func (t *GrepTool) Schema() map[string]interface{} {
 	return map[string]interface{}{
@@ -287,8 +289,10 @@ func (t *GrepTool) Execute(input map[string]interface{}) *Result {
 // FindTool finds files by name pattern.
 type FindTool struct{}
 
-func (t *FindTool) Name() string        { return "find" }
-func (t *FindTool) Description() string { return "Find files by name pattern. Uses fd if available, find otherwise." }
+func (t *FindTool) Name() string { return "find" }
+func (t *FindTool) Description() string {
+	return "Find files by name pattern. Uses fd if available, find otherwise."
+}
 
 func (t *FindTool) Schema() map[string]interface{} {
 	return map[string]interface{}{

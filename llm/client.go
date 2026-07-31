@@ -54,6 +54,7 @@ type Response struct {
 	Content    []ContentBlock `json:"content"`
 	StopReason string         `json:"stop_reason"`
 	Model      string         `json:"model"`
+	Usage      *Usage         `json:"usage,omitempty"`
 }
 
 type ContentBlock struct {
@@ -83,10 +84,10 @@ type StreamDelta struct {
 }
 
 type Client struct {
-	apiKey    string
-	baseURL   string
-	model     string
-	http      *http.Client
+	apiKey     string
+	baseURL    string
+	model      string
+	http       *http.Client
 	TotalUsage Usage // accumulated across requests
 }
 
@@ -131,6 +132,11 @@ func (c *Client) SendWithContext(ctx context.Context, req *Request) (*Response, 
 	var result Response
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	// Track token usage from the response (non-streaming path).
+	if result.Usage != nil {
+		c.TotalUsage = addUsage(c.TotalUsage, *result.Usage)
 	}
 
 	return &result, nil

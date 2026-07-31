@@ -475,6 +475,7 @@ func showHelp() {
 	fmt.Printf("  %s/mode%s             Show current mode, model, thinking\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/reload%s           Reload context files, tools, and config\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/multiline%s        Open editor for multi-line input\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/compact [instr]%s   Summarize old messages to free context\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/session%s          Show current session info\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/save [name]%s      Save and name current session\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/load <id>%s        Load a session by ID prefix\n", ANSIYellow, ANSIReset)
@@ -765,6 +766,18 @@ func dispatch(input string, reader *bufio.Reader) {
 			dispatch(result, reader)
 		}
 
+	case input == "/compact" || strings.HasPrefix(input, "/compact "):
+		instr := strings.TrimSpace(strings.TrimPrefix(input, "/compact "))
+		fmt.Printf("%s🧹 Compacting context...%s\n", ANSIYellow, ANSIReset)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		err := ag.Compact(ctx, instr)
+		cancel()
+		if err != nil {
+			fmt.Printf("%s✗ compact: %v%s\n", ANSIRed, err, ANSIReset)
+		} else {
+			fmt.Printf("%s✓ Context compacted — earlier messages summarized%s\n", ANSIGreen, ANSIReset)
+		}
+
 	// ─── Session Commands ─────────────────────────────────────
 	case input == "/session":
 		s := ag.Session()
@@ -843,25 +856,42 @@ func handleRunError(err error) {
 		fmt.Fprintf(os.Stderr, "%s✓ Rebuilt — retry your command%s\n", ANSIGreen, ANSIReset)
 		autoRepairAttempt = 0 // reset on success
 	} else {
-		fmt.Fprintf(os.Stderr, "%s💡 %sr%s to auto-repair, any key to continue%s\n", ANSIGray, ANSIYellow, ANSIGray, ANSIReset)
-		// Read single key (non-blocking scan)
-		scanner := bufio.NewScanner(os.Stdin)
-		if scanner.Scan() {
-			key := strings.TrimSpace(strings.ToLower(scanner.Text()))
-			if key == "r" {
-				if err := ag.AutoRepair(context.Background(), errMsg); err != nil {
-					fmt.Fprintf(os.Stderr, "%sRepair error:%s %v\n", ANSIRed, ANSIReset, err)
-					return
-				}
-				fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
-				if err := ag.Rebuild(); err != nil {
-					fmt.Fprintf(os.Stderr, "%sRebuild failed:%s %v\n", ANSIRed, ANSIReset, err)
-				} else {
-					fmt.Fprintf(os.Stderr, "%s✓ Rebuilt — retry your command%s\n", ANSIGreen, ANSIReset)
-				}
+		fmt.Fprintf(os.Stderr, "%s💡 %sr%s to auto-repair, Enter to continue%s\n", ANSIGray, ANSIYellow, ANSIGray, ANSIReset)
+		if readKey(10*time.Second) == "r" {
+			if err := ag.AutoRepair(context.Background(), errMsg); err != nil {
+				fmt.Fprintf(os.Stderr, "%sRepair error:%s %v\n", ANSIRed, ANSIReset, err)
+				return
+			}
+			fmt.Printf("\n%s🔨 Rebuilding...%s\n", ANSIYellow, ANSIReset)
+			if err := ag.Rebuild(); err != nil {
+				fmt.Fprintf(os.Stderr, "%sRebuild failed:%s %v\n", ANSIRed, ANSIReset, err)
+			} else {
+				fmt.Fprintf(os.Stderr, "%s✓ Rebuilt — retry your command%s\n", ANSIGreen, ANSIReset)
 			}
 		}
 	}
+}
+
+// readKey reads a single key in raw mode and returns a normalized action.
+// Waits up to timeout; returns "continue" on timeout/error/any other key.
+func readKey(timeout time.Duration) string {
+	fd := int(os.Stdin.Fd())
+	oldState, err := makeRawInputOnly(fd)
+	if err != nil {
+		return "continue"
+	}
+	defer term.Restore(fd, oldState)
+	os.Stdin.SetReadDeadline(time.Now().Add(timeout))
+	defer os.Stdin.SetReadDeadline(time.Time{})
+	var buf [1]byte
+	n, err := os.Stdin.Read(buf[:])
+	if err != nil || n == 0 {
+		return "continue"
+	}
+	if buf[0] == 'r' || buf[0] == 'R' {
+		return "r"
+	}
+	return "continue"
 }
 
 func handleContinue() {

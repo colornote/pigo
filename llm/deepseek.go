@@ -106,7 +106,8 @@ func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSReque
 
 	var fullContent strings.Builder
 	var fullReasoning strings.Builder
-	var inThink bool // true when we're inside a  reply  tag
+	var inThink bool   // true when we're inside an inline CoT tag pair
+	var pending string // held-back bytes that may start a tag
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -135,9 +136,9 @@ func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSReque
 				}
 			}
 
-			// Regular content — may include inline  reply  tags
+			// Regular content — may include inline CoT tags
 			if choice.Delta.Content != "" {
-				c.processDelta(choice.Delta.Content, &inThink,
+				c.processDelta(choice.Delta.Content, &inThink, &pending,
 					&fullReasoning, &fullContent,
 					onReasoning, onContent)
 			}
@@ -157,26 +158,72 @@ func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSReque
 		return fullContent.String(), fmt.Errorf("scan: %w", err)
 	}
 
+	// Flush any held-back partial tag at end of stream.
+	if pending != "" {
+		if inThink {
+			fullReasoning.WriteString(pending)
+			if onReasoning != nil {
+				onReasoning(pending)
+			}
+		} else {
+			fullContent.WriteString(pending)
+			if onContent != nil {
+				onContent(pending)
+			}
+		}
+	}
+
 	return fullContent.String(), nil
 }
 
-// processDelta handles inline  reply  tags embedded in content deltas.
-// Some DeepSeek models emit reasoning by wrapping it in  reply tags
-// inside the regular content field instead of using reasoning_content.
-func (c *DeepSeekClient) processDelta(delta string, inThink *bool,
+// Inline CoT tags. Some DeepSeek models emit reasoning by wrapping it in
+// tag pairs inside the regular content field instead of using the
+// dedicated reasoning_content field. Accept both Chinese and English forms.
+var (
+	cotOpenTags  = []string{" 回复", "<reply>", " 思考"}
+	cotCloseTags = []string{" /回复", "</reply>", " /思考"}
+)
+
+// indexAny returns the earliest index of any tag in tags and the length of
+// the matched tag, or (-1, 0) when nothing matches.
+func indexAny(s string, tags []string) (int, int) {
+	best, bestLen := -1, 0
+	for _, t := range tags {
+		if i := strings.Index(s, t); i >= 0 && (best < 0 || i < best) {
+			best, bestLen = i, len(t)
+		}
+	}
+	return best, bestLen
+}
+
+// processDelta handles inline CoT tags embedded in content deltas.
+// Reasoning between an opening/closing tag pair is routed to the
+// reasoning callback; everything else goes to the content callback.
+// When no opening tag appears, all content is treated as a normal
+// answer (never swallowed). Tags split across stream chunks are
+// reassembled via the pending buffer.
+func (c *DeepSeekClient) processDelta(delta string, inThink *bool, pending *string,
 	reasoning, content *strings.Builder,
 	onReasoning CoTCallback, onContent func(string)) {
 
-	rem := delta
+	rem := *pending + delta
+	*pending = ""
+
 	for rem != "" {
 		if *inThink {
-			// Looking for  reply to end thinking
-			idx := strings.Index(rem, " reply")
+			// Looking for a closing tag to end the thinking block.
+			idx, tagLen := indexAny(rem, cotCloseTags)
 			if idx < 0 {
-				reasoning.WriteString(rem)
-				if onReasoning != nil {
-					onReasoning(rem)
+				// No closing tag yet — emit reasoning, but hold back a
+				// trailing partial tag prefix in case it's split mid-chunk.
+				emit, held := splitPartialTag(rem, cotCloseTags)
+				if emit != "" {
+					reasoning.WriteString(emit)
+					if onReasoning != nil {
+						onReasoning(emit)
+					}
 				}
+				*pending = held
 				return
 			}
 			if idx > 0 {
@@ -187,17 +234,23 @@ func (c *DeepSeekClient) processDelta(delta string, inThink *bool,
 				}
 			}
 			*inThink = false
-			rem = rem[idx+len(" reply"):]
+			rem = rem[idx+tagLen:]
 			continue
 		}
 
-		// Not in think — look for 
-		idx := strings.Index(rem, "")
+		// Not in think — look for an opening tag.
+		idx, tagLen := indexAny(rem, cotOpenTags)
 		if idx < 0 {
-			content.WriteString(rem)
-			if onContent != nil {
-				onContent(rem)
+			// No opening tag in this chunk — it's regular answer content.
+			// Hold back a trailing partial tag prefix if any.
+			emit, held := splitPartialTag(rem, cotOpenTags)
+			if emit != "" {
+				content.WriteString(emit)
+				if onContent != nil {
+					onContent(emit)
+				}
 			}
+			*pending = held
 			return
 		}
 		if idx > 0 {
@@ -208,6 +261,30 @@ func (c *DeepSeekClient) processDelta(delta string, inThink *bool,
 			}
 		}
 		*inThink = true
-		rem = rem[idx+len(""):]
+		rem = rem[idx+tagLen:]
 	}
+}
+
+// splitPartialTag splits s into (emit, held): held is the longest suffix of
+// s that is a proper prefix of any tag in tags (at least 2 bytes long), and
+// emit is the rest. If no such suffix exists, held is "" and emit is s.
+func splitPartialTag(s string, tags []string) (string, string) {
+	best := 0
+	for _, t := range tags {
+		// Check suffixes of s of length 2..len(t)-1 against prefixes of t.
+		maxL := len(t) - 1
+		limit := maxL
+		if limit > len(s) {
+			limit = len(s)
+		}
+		for l := 2; l <= limit; l++ {
+			if strings.HasPrefix(t, s[len(s)-l:]) && l > best {
+				best = l
+			}
+		}
+	}
+	if best == 0 {
+		return s, ""
+	}
+	return s[:len(s)-best], s[len(s)-best:]
 }

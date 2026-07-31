@@ -42,5 +42,12 @@ pigo/
 
 ## Known Issues to Fix
 - [x] Session auto-save on /quit (done)
-- [ ] Compaction (summarize long sessions) — needed for long-running agents
+- [x] Compaction (summarize long sessions) — `/compact [instructions]` + auto-compact at ~85% context; summary recorded as a `compaction` session entry and re-injected on resume
 - [x] Handle SIGINT (Ctrl+C) gracefully in cooked mode (auto-save session — done via signal.Notify + goodbye)
+
+## Notes
+- Inline CoT tag parsing (`llm/deepseek.go`): fixed a bug where an empty opening-tag
+  string caused all content deltas to be routed to the thinking display (answers were
+  swallowed). Parser now accepts Chinese (` 回复`/` /回复`, ` 思考`/` /思考`) and HTML
+  (`<reply>`/`</reply>`) tag pairs, never swallows tagless content, and reassembles
+  tags split across SSE chunks via a pending buffer. Covered by `llm/deepseek_test.go`.
