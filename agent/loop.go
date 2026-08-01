@@ -596,6 +596,7 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 			toolUses   []llm.ContentBlock
 			firstToken bool
 			inThinking bool
+			mdOut      *markdownStream // renders markdown as lines complete
 		)
 
 		onThinking := func(thinking string) {
@@ -623,7 +624,10 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 					fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 30))
 				}
 			}
-			fmt.Print(text)
+			if mdOut == nil {
+				mdOut = NewMarkdownStream(func(s string) { fmt.Print(s) })
+			}
+			mdOut.Write(text)
 			textBuf.WriteString(text)
 		}
 
@@ -712,6 +716,9 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		assistantText := strings.Join(textParts, "")
 
 		// Ensure clean separation after streamed text
+		if mdOut != nil {
+			mdOut.Flush() // close code blocks / tables / partial line
+		}
 		if textBuf.Len() > 0 {
 			fmt.Println()
 		}
@@ -834,6 +841,7 @@ func (a *Agent) runCoT(ctx context.Context, prompt string) (string, error) {
 
 	reasoningStarted := false
 	contentStarted := false
+	var mdOut *markdownStream
 
 	finalContent, err := a.deepseekClient.SendStreamWithContext(ctx, req,
 		func(reasoning string) {
@@ -852,12 +860,18 @@ func (a *Agent) runCoT(ctx context.Context, prompt string) (string, error) {
 				fmt.Fprintf(os.Stderr, "%s\n", sep)
 				fmt.Fprintf(os.Stderr, "%s💡 回答 · Answer%s\n", ANSIGreen, ANSIReset)
 			}
-			fmt.Fprint(os.Stderr, content)
+			if mdOut == nil {
+				mdOut = NewMarkdownStream(func(s string) { fmt.Fprint(os.Stderr, s) })
+			}
+			mdOut.Write(content)
 		},
 	)
 
 	if err != nil {
 		return "", fmt.Errorf("CoT API: %w", err)
+	}
+	if mdOut != nil {
+		mdOut.Flush()
 	}
 
 	// Persist the completed turn so multi-turn CoT conversations retain
