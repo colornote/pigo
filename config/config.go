@@ -30,6 +30,59 @@ type Config struct {
 	VisionModel string
 }
 
+// starterAGENTS is written to ~/.pigo/AGENTS.md on first run (when the file
+// doesn't exist yet). It doubles as user-facing docs and as the default
+// system-prompt context: the file is loaded automatically at startup and
+// appended to the built-in prompt. Users edit it freely; PiGo never
+// overwrites it.
+const starterAGENTS = `# PiGo Agent Instructions
+
+This file is loaded automatically at startup and added to your system prompt
+(along with the built-in default). Edit it to give PiGo persistent rules,
+conventions, and project-independent instructions. Delete it to go back to
+the built-in default prompt.
+
+## Tools
+- read   — read text files (image files: vision hint for text models, data URL for multimodal models)
+- write  — create/overwrite files
+- edit   — apply exact-text edits
+- bash   — run shell commands
+- grep / find / ls — search and list files
+- vision — analyze an image with the vision sub-agent model (default mimo-v2.5 on opencode-go)
+
+## Vision
+You cannot see images directly (unless you are a multimodal model like
+mimo-v2.5). To analyze a screenshot, diagram, UI mockup, chart, or any image
+file, call the vision tool with an image path and an optional question. The
+vision model returns a text description you can act on.
+
+## Docs
+Check docs/ for pi design reference & feature specs.
+`
+
+// ensureGlobalContext creates ~/.pigo and, on first run, writes a starter
+// AGENTS.md the user can edit. It never overwrites an existing file (user
+// customizations win). Returns the AGENTS.md path, or "" when it can't be
+// created (no home dir, no permissions).
+func ensureGlobalContext() string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	pigoDir := filepath.Join(home, ".pigo")
+	if err := os.MkdirAll(pigoDir, 0755); err != nil {
+		return ""
+	}
+	path := filepath.Join(pigoDir, "AGENTS.md")
+	if _, err := os.Stat(path); err == nil {
+		return path // already exists — never clobber user content
+	}
+	if err := os.WriteFile(path, []byte(starterAGENTS), 0644); err != nil {
+		return ""
+	}
+	return path
+}
+
 // LoadSystemPrompt re-derives the system prompt from context files.
 // main.go calls it after CLI flags (-nc/--no-context-files) are parsed so
 // the flag and config.Load() ordering doesn't matter.
@@ -57,8 +110,13 @@ func EnvKeyFor(providerID string) string {
 }
 
 func Load() *Config {
-	// 1. Load .env files (home then cwd, cwd overrides)
+	// 0. Ensure ~/.pigo exists with a starter AGENTS.md on first run, so
+	//    the user always has a system/agent prompt doc to customize and the
+	//    vision tool is documented. Never overwrites an existing file.
 	home, _ := os.UserHomeDir()
+	ensureGlobalContext()
+
+	// 1. Load .env files (home then cwd, cwd overrides)
 	loadEnvFile(filepath.Join(home, ".pigo", ".env"))
 	loadEnvFile(".env")
 
