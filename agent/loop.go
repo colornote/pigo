@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -767,11 +768,13 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 				fmt.Fprintf(os.Stderr, " %s$ %s%s", ANSIGray, truncDisplay(cmd, 120), ANSIReset)
 			}
 
-			// Edit: preview the change (before → after snippet)
+			// Edit: preview the change as a pi-style line diff (with word-level
+			// highlighting on changed lines), computed WITHOUT applying it.
 			if tu.Name == "edit" {
+				path, _ := tu.Input["path"].(string)
 				oldText, _ := tu.Input["oldText"].(string)
 				newText, _ := tu.Input["newText"].(string)
-				displayEditPreview(oldText, newText)
+				displayEditDiff(path, oldText, newText)
 			}
 
 			// Read/Write/Grep/Find/Ls: show a short arg preview
@@ -1559,16 +1562,169 @@ func truncDisplay(s string, maxLen int) string {
 	return s
 }
 
-// displayEditPreview shows a compact before→after diff hint.
-func displayEditPreview(oldText, newText string) {
-	ol := truncDisplay(oldText, 40)
-	nl := truncDisplay(newText, 40)
-	if ol == nl {
+// displayEditDiff shows a pi-style line diff of the pending edit, without
+// applying it: removed lines red, added lines green, context gray, with
+// line numbers and word-level inverse highlighting on changed lines.
+func displayEditDiff(path, oldText, newText string) {
+	if oldText == newText {
 		return
 	}
-	fmt.Fprintf(os.Stderr, " %s-%s%s %s+%s%s",
-		ANSIRed, ol, ANSIReset,
-		ANSIGreen, nl, ANSIReset)
+	diff, err := tools.PreviewEdit(path, oldText, newText)
+	if err != nil {
+		// Fall back to the compact inline preview when the file can't be
+		// diffed (missing file, oldText mismatch reported by the tool anyway).
+		ol := truncDisplay(oldText, 40)
+		nl := truncDisplay(newText, 40)
+		if ol != nl {
+			fmt.Fprintf(os.Stderr, " %s-%s%s %s+%s%s",
+				ANSIRed, ol, ANSIReset,
+				ANSIGreen, nl, ANSIReset)
+		}
+		return
+	}
+	fmt.Fprint(os.Stderr, "\n")
+	renderDiffLines(os.Stderr, diff)
+}
+
+// renderDiffLines colors a pi-format diff text ("+<n> ...", "-<n> ...",
+// " <n> ...", "...") and applies word-level inverse highlighting to
+// paired removed/added lines. Output is capped at 80 lines.
+func renderDiffLines(w io.Writer, diff string) {
+	lines := strings.Split(diff, "\n")
+	if len(lines) > 80 {
+		lines = append(lines[:80], fmt.Sprintf("   ... (%d more lines)", len(lines)-80))
+	}
+	var pendingDel string
+	flushDel := func() {
+		if pendingDel != "" {
+			fmt.Fprintf(w, "%s%s%s\n", ANSIRed, pendingDel, ANSIReset)
+			pendingDel = ""
+		}
+	}
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		switch line[0] {
+		case '+':
+			if pendingDel != "" {
+				// Pair with the previous removed line for word-level highlight.
+				delMarked, addMarked := markWordDiff(pendingDel, line)
+				fmt.Fprintf(w, "%s%s%s\n", ANSIRed, delMarked, ANSIReset)
+				fmt.Fprintf(w, "%s%s%s\n", ANSIGreen, addMarked, ANSIReset)
+				pendingDel = ""
+			} else {
+				fmt.Fprintf(w, "%s%s%s\n", ANSIGreen, line, ANSIReset)
+			}
+		case '-':
+			flushDel()
+			pendingDel = line
+		case ' ':
+			flushDel()
+			fmt.Fprintf(w, "%s%s%s\n", ANSIGray, line, ANSIReset)
+		default:
+			flushDel()
+			fmt.Fprintln(w, line)
+		}
+	}
+	flushDel()
+}
+
+// markWordDiff computes word-level LCS of two diff line bodies and returns
+// them with changed words wrapped in inverse-video ANSI. Both lines carry
+// their own line-number prefix ("+12 " / "-12 "), which is excluded.
+func markWordDiff(delLine, addLine string) (string, string) {
+	// Split off the line-number prefixes ("-12 text" → prefix + body).
+	_, delBody := splitDiffLine(delLine)
+	_, addBody := splitDiffLine(addLine)
+	delMarked, addMarked := diffWordsMarked(delBody, addBody)
+	return delLine[:len(delLine)-len(delBody)] + delMarked, addLine[:len(addLine)-len(addBody)] + addMarked
+}
+
+// splitDiffLine splits "±<n> body" into (prefix, body).
+func splitDiffLine(line string) (string, string) {
+	for i := 1; i < len(line); i++ {
+		if line[i] == ' ' {
+			return line[:i+1], line[i+1:]
+		}
+	}
+	return line, ""
+}
+
+// diffWordsMarked marks words that differ between a and b with inverse
+// video: common words plain, changed words wrapped in \x1b[7m…\x1b[0m.
+func diffWordsMarked(a, b string) (string, string) {
+	wa := splitWords(a)
+	wb := splitWords(b)
+	// LCS on words.
+	n, m := len(wa), len(wb)
+	dp := make([][]int, n+1)
+	for i := range dp {
+		dp[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if wa[i] == wb[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+	const invOn, invOff = "\x1b[7m", "\x1b[0m"
+	var ra, rb strings.Builder
+	i, j := 0, 0
+	for i < n && j < m {
+		if wa[i] == wb[j] {
+			ra.WriteString(wa[i])
+			rb.WriteString(wb[j])
+			i, j = i+1, j+1
+		} else if dp[i+1][j] >= dp[i][j+1] {
+			ra.WriteString(invOn + wa[i] + invOff)
+			i++
+		} else {
+			rb.WriteString(invOn + wb[j] + invOff)
+			j++
+		}
+	}
+	for i < n {
+		ra.WriteString(invOn + wa[i] + invOff)
+		i++
+	}
+	for j < m {
+		rb.WriteString(invOn + wb[j] + invOff)
+		j++
+	}
+	return ra.String(), rb.String()
+}
+
+// splitWords splits s into whitespace-delimited words (whitespace itself is
+// attached to the preceding word so spacing survives highlighting).
+func splitWords(s string) []string {
+	var words []string
+	var cur strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c == ' ' || c == '\t') && cur.Len() > 0 {
+			cur.WriteByte(c)
+			words = append(words, cur.String())
+			cur.Reset()
+		} else if c == ' ' || c == '\t' {
+			// leading whitespace: attach to next word
+			cur.WriteByte(c)
+		} else {
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		words = append(words, cur.String())
+	}
+	if len(words) == 0 {
+		words = []string{s}
+	}
+	return words
 }
 
 // displayBashOutput prints command output with a clean gutter.
