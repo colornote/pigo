@@ -25,6 +25,20 @@ type TextContent struct {
 	Text string `json:"text"`
 }
 
+// ImageSource is the base64 source of an image content block
+// (Anthropic protocol: {"type":"image","source":{"type":"base64","media_type":...,"data":...}}).
+type ImageSource struct {
+	Type      string `json:"type"` // "base64"
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"` // base64-encoded bytes
+}
+
+// ImageContent is an image block in a message (Anthropic protocol).
+type ImageContent struct {
+	Type   string      `json:"type"` // "image"
+	Source ImageSource `json:"source"`
+}
+
 type ToolUseContent struct {
 	Type  string                 `json:"type"`
 	ID    string                 `json:"id"`

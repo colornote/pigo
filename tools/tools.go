@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -75,6 +76,23 @@ func (t *ReadTool) Execute(input map[string]interface{}) *Result {
 	if path == "" {
 		return &Result{Error: "path required"}
 	}
+
+	// Multimodal support: image files are returned as a base64 data URL
+	// ("data:image/png;base64,..."). The agent loop detects this prefix and
+	// converts the tool result into an image content block for vision models.
+	// Size-capped so a huge file can't blow up the context window.
+	if mime := imageMime(path); mime != "" {
+		const maxImageBytes = 5 * 1024 * 1024 // 5MB
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return &Result{Error: err.Error()}
+		}
+		if len(data) > maxImageBytes {
+			return &Result{Error: fmt.Sprintf("image too large: %d bytes (max %d)", len(data), maxImageBytes)}
+		}
+		return &Result{Success: true, Output: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)}
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return &Result{Error: err.Error()}
@@ -107,6 +125,24 @@ func (t *ReadTool) Execute(input map[string]interface{}) *Result {
 		output = output[:50000] + "\n\n[Truncated]"
 	}
 	return &Result{Success: true, Output: output}
+}
+
+// imageMime returns the MIME type for a supported image file extension,
+// or "" when the file is not an image.
+func imageMime(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	}
+	return ""
 }
 
 // ─── WriteTool ───────────────────────────────────────────────────

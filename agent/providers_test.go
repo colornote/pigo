@@ -60,6 +60,17 @@ func TestProviderResolve(t *testing.T) {
 	if got := oc.Resolve("deepseek-reasoner"); got != "deepseek-v4-flash" {
 		t.Errorf("cross-provider model should fall back to opencode-go default, got %q", got)
 	}
+	// MiMo V2.5 is registered as a multimodal model on opencode-go.
+	mimo := oc.Model("mimo-v2.5")
+	if mimo == nil {
+		t.Fatal("mimo-v2.5 missing from opencode-go")
+	}
+	if !mimo.Multimodal {
+		t.Error("mimo-v2.5 should be marked Multimodal")
+	}
+	if mimo.ContextWindow != 128_000 {
+		t.Errorf("mimo-v2.5 context window: got %d", mimo.ContextWindow)
+	}
 	// Model info carries pricing + context window + OpenAI protocol flag.
 	info := oc.Model("deepseek-v4-flash")
 	if info == nil {

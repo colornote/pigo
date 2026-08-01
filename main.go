@@ -636,11 +636,12 @@ func fileArgPrompt(path string) string {
 	if err != nil {
 		return fmt.Sprintf("[@%s: %v]", path, err)
 	}
-	// Binary/image files can't be inlined — reference the path so the
-	// model can read them with the read tool if needed.
+	// Binary/image files can't be inlined into the prompt string — reference
+	// the path so the model can read them with the read tool. Multimodal
+	// models (e.g. opencode-go mimo-v2.5) see the image contents that way.
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf":
-		return fmt.Sprintf("[@%s: binary file — use the read tool if needed]", path)
+		return fmt.Sprintf("[@%s: image/binary file — use the read tool to view it]", path)
 	}
 	content := string(data)
 	if len(content) > 40000 {
