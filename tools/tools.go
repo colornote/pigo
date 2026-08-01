@@ -27,18 +27,26 @@ type Tool interface {
 
 type Registry struct {
 	tools map[string]Tool
+	order []string // registration order — List() returns tools in this order
 }
 
 func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]Tool)}
 }
 
-func (r *Registry) Register(t Tool)      { r.tools[t.Name()] = t }
+func (r *Registry) Register(t Tool) {
+	if _, ok := r.tools[t.Name()]; !ok {
+		r.order = append(r.order, t.Name())
+	}
+	r.tools[t.Name()] = t
+}
 func (r *Registry) Get(name string) Tool { return r.tools[name] }
 func (r *Registry) List() []Tool {
-	var out []Tool
-	for _, t := range r.tools {
-		out = append(out, t)
+	// Registration order, not map iteration order, so the tool schema sent
+	// to the API is identical across runs and calls.
+	out := make([]Tool, 0, len(r.order))
+	for _, name := range r.order {
+		out = append(out, r.tools[name])
 	}
 	return out
 }

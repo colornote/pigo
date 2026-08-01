@@ -1521,7 +1521,7 @@ func loadContextFiles(home string) string {
 	}
 
 	if len(parts) == 0 {
-		return "You are PiGo — a coding agent in Go.\nTools: read, write, edit, bash.\nBe concise. Use edit for changes.\n\n## Docs\nCheck `docs/` for pi design reference & feature specs.\n"
+		return "You are PiGo — a coding agent in Go.\nTools: read, write, edit, bash, grep, find, ls.\nBe concise. Use edit for changes.\n\n## Docs\nCheck `docs/` for pi design reference & feature specs.\n"
 	}
 
 	return strings.Join(parts, "\n\n")
@@ -1733,7 +1733,8 @@ func splitWords(s string) []string {
 func displayBashOutput(output string) {
 	lines := strings.Split(output, "\n")
 	limit := 50
-	truncated := len(lines) > limit
+	total := len(lines)
+	truncated := total > limit
 	if truncated {
 		lines = lines[:limit]
 	}
@@ -1750,7 +1751,7 @@ func displayBashOutput(output string) {
 	}
 	if truncated {
 		fmt.Fprintf(os.Stderr, "%s  │%s %s... (%d lines total, showing first %d)%s\n",
-			ANSIGray, ANSIReset, ANSIGray, len(lines)+1, limit, ANSIReset)
+			ANSIGray, ANSIReset, ANSIGray, total, limit, ANSIReset)
 	}
 }
 

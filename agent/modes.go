@@ -79,7 +79,7 @@ func BuildSystemPromptWithDir(mode Mode, contextInfo, workDir string) string {
 
 	default:
 		sb.WriteString("You are PiGo — a coding agent in Go.\n")
-		sb.WriteString("Tools: read, write, edit, bash.\n")
+		sb.WriteString("Tools: read, write, edit, bash, grep, find, ls.\n")
 		sb.WriteString("Be concise. Use edit, not write, for changes.\n\n")
 		sb.WriteString("## Rules\n")
 		sb.WriteString("- Read files ONLY once per turn — don't re-read unchanged files\n")

@@ -1,8 +1,9 @@
 package agent
 
 import (
-	"context"
 	"testing"
+
+	"pigo/llm"
 )
 
 // TestProviderForModel verifies cross-provider model lookup used by
@@ -84,7 +85,11 @@ func TestSwitchProviderPreservesState(t *testing.T) {
 	if err := a.InitSession(""); err != nil {
 		t.Fatalf("InitSession: %v", err)
 	}
-	a.Run(context.Background(), "hi")
+	// Simulate one exchanged turn WITHOUT hitting the network.
+	a.messages = append(a.messages, llm.Message{
+		Role:    "user",
+		Content: []llm.TextContent{{Type: "text", Text: "hi"}},
+	})
 	msgCount := len(a.messages)
 	oldClient := a.client
 
