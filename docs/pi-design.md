@@ -61,3 +61,10 @@ pigo/
   swallowed). Parser now accepts Chinese (` 回复`/` /回复`, ` 思考`/` /思考`) and HTML
   (`<reply>`/`</reply>`) tag pairs, never swallows tagless content, and reassembles
   tags split across SSE chunks via a pending buffer. Covered by `llm/deepseek_test.go`.
+- Tool registry (`tools/tools.go`): `Registry.List()` returns tools in registration
+  order (was map iteration order), so the tool schema sent to the API is identical
+  across runs and calls. The registered set is unchanged — read/write/edit/bash/
+  grep/find/ls. System prompt now lists all 7 tools so the model uses grep/find/ls
+  instead of falling back to bash.
+- Bash output gutter (`agent/loop.go` `displayBashOutput`): truncation message now
+  reports the real total line count (was counting the truncated slice).
