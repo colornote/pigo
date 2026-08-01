@@ -54,7 +54,26 @@ func (r *Registry) List() []Tool {
 
 // ─── ReadTool ────────────────────────────────────────────────────
 
-type ReadTool struct{}
+// Image-mode constants control how ReadTool returns image files.
+const (
+	// ImageModeDataURL returns the image as a base64 data URL so multimodal
+	// main models (e.g. opencode-go mimo-v2.5) can see it directly.
+	ImageModeDataURL = "dataurl"
+	// ImageModeHint returns a short pointer to the vision tool — for text
+	// main models, a raw base64 blob would be unreadable token garbage.
+	ImageModeHint = "hint"
+)
+
+// MaxImageBytes is the size cap for images returned by read / sent to the
+// vision tool (5MB) — keeps base64 blobs from blowing up the context window.
+const MaxImageBytes = 5 * 1024 * 1024
+
+type ReadTool struct {
+	// ImageMode controls how image files are returned:
+	// ImageModeDataURL → base64 data URL (multimodal models);
+	// ImageModeHint → short pointer to the vision tool (default for text models).
+	ImageMode string
+}
 
 func (t *ReadTool) Name() string        { return "read" }
 func (t *ReadTool) Description() string { return "Read file contents. Supports text files and images." }
@@ -77,20 +96,24 @@ func (t *ReadTool) Execute(input map[string]interface{}) *Result {
 		return &Result{Error: "path required"}
 	}
 
-	// Multimodal support: image files are returned as a base64 data URL
-	// ("data:image/png;base64,..."). The agent loop detects this prefix and
-	// converts the tool result into an image content block for vision models.
-	// Size-capped so a huge file can't blow up the context window.
-	if mime := imageMime(path); mime != "" {
-		const maxImageBytes = 5 * 1024 * 1024 // 5MB
+	// Multimodal support: image files are handled per ImageMode.
+	if mime := ImageMime(path); mime != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return &Result{Error: err.Error()}
 		}
-		if len(data) > maxImageBytes {
-			return &Result{Error: fmt.Sprintf("image too large: %d bytes (max %d)", len(data), maxImageBytes)}
+		if len(data) > MaxImageBytes {
+			return &Result{Error: fmt.Sprintf("image too large: %d bytes (max %d)", len(data), MaxImageBytes)}
 		}
-		return &Result{Success: true, Output: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)}
+		if t.ImageMode == ImageModeDataURL {
+			// base64 data URL — multimodal main models see the picture.
+			return &Result{Success: true, Output: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)}
+		}
+		// Hint mode (default): text models can't read base64; point at the
+		// vision tool instead of wasting tokens on unreadable blob.
+		return &Result{Success: true, Output: fmt.Sprintf(
+			"[Image: %s (%s, %s) — this model cannot see images; use the vision tool to analyze it]",
+			path, mime, formatSize(len(data)))}
 	}
 
 	data, err := os.ReadFile(path)
@@ -127,9 +150,9 @@ func (t *ReadTool) Execute(input map[string]interface{}) *Result {
 	return &Result{Success: true, Output: output}
 }
 
-// imageMime returns the MIME type for a supported image file extension,
+// ImageMime returns the MIME type for a supported image file extension,
 // or "" when the file is not an image.
-func imageMime(path string) string {
+func ImageMime(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".png":
 		return "image/png"
@@ -143,6 +166,18 @@ func imageMime(path string) string {
 		return "image/bmp"
 	}
 	return ""
+}
+
+// formatSize renders a byte count compactly (12.3KB / 1.2MB / 900B).
+func formatSize(n int) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%dB", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1fKB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1fMB", float64(n)/(1024*1024))
+	}
 }
 
 // ─── WriteTool ───────────────────────────────────────────────────
@@ -710,4 +745,56 @@ func (t *LsTool) Execute(input map[string]interface{}) *Result {
 		result = "(empty directory)"
 	}
 	return &Result{Success: true, Output: result}
+}
+
+// ─── VisionTool (vision sub-agent) ─────────────────────────────
+
+// VisionTool analyzes an image with a multimodal vision model and returns a
+// text description to the main agent. It acts as a sub-agent bridge: the
+// main model (e.g. deepseek, text-only) passes a local image path and an
+// optional question; the tool sends the image to the vision model
+// (mimo-v2.5 on opencode-go by default) and returns its answer as text the
+// main agent can act on.
+//
+// The actual LLM call lives outside this package (injected via Runner by
+// agent.New) so tools stays free of llm imports. A nil Runner means the
+// vision model isn't configured — the tool reports that clearly.
+type VisionTool struct {
+	// Runner executes the vision request and returns the model's text
+	// answer. Set by agent.New; nil → "vision model not configured".
+	Runner func(path, prompt string) (string, error)
+}
+
+func (t *VisionTool) Name() string { return "vision" }
+func (t *VisionTool) Description() string {
+	return "Analyze an image using the vision model (mimo-v2.5). " +
+		"Use for screenshots, diagrams, UI mockups, charts, or any image file. " +
+		"Returns a text description of the image that you can act on."
+}
+
+func (t *VisionTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path":   map[string]interface{}{"type": "string", "description": "Image file path (png/jpg/jpeg/gif/webp/bmp)"},
+			"prompt": map[string]interface{}{"type": "string", "description": "Optional question about the image (default: describe it)"},
+		},
+		"required": []string{"path"},
+	}
+}
+
+func (t *VisionTool) Execute(input map[string]interface{}) *Result {
+	path, _ := input["path"].(string)
+	if path == "" {
+		return &Result{Error: "path required"}
+	}
+	prompt, _ := input["prompt"].(string)
+	if t.Runner == nil {
+		return &Result{Error: "vision model not configured — set OPENCODE_API_KEY (see /login opencode-go, /reload)"}
+	}
+	out, err := t.Runner(path, prompt)
+	if err != nil {
+		return &Result{Success: false, Error: err.Error()}
+	}
+	return &Result{Success: true, Output: out}
 }

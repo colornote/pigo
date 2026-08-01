@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"pigo/session"
 	"pigo/tools"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -70,7 +72,9 @@ func New(cfg *config.Config) *Agent {
 	reg.Register(&tools.LsTool{})
 	reg.Register(&tools.GrepTool{})
 	reg.Register(&tools.FindTool{})
-
+	// Vision sub-agent tool: analyze images via a multimodal model
+	// (mimo-v2.5 on opencode-go) and return a text description. The runner
+	// is injected later (after cfg is captured) so it reads live env vars.
 	// Session manager rooted at ~/.pigo/sessions, overridable via
 	// PIGO_SESSION_DIR env var or the --session-dir CLI flag.
 	home, _ := os.UserHomeDir()
@@ -100,6 +104,8 @@ func New(cfg *config.Config) *Agent {
 		messageIDs:     []string{},
 	}
 	a.SetThinking(ThinkingLevel(cfg.ThinkingLevel))
+	// Wire the vision sub-agent tool to the live runner (reads env on call).
+	reg.Register(&tools.VisionTool{Runner: a.runVision})
 	a.refreshGitContext()
 	return a
 }
@@ -783,6 +789,20 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 				fmt.Fprintf(os.Stderr, " %s%s%s", ANSIGray, argPreview, ANSIReset)
 			}
 
+			// Read: route image files per the MAIN model's capabilities —
+			// multimodal models get the base64 data URL (they can see it),
+			// text models get a pointer to the vision tool (a base64 blob
+			// would be unreadable token garbage for them).
+			if tu.Name == "read" {
+				if rt, ok := tool.(*tools.ReadTool); ok {
+					if a.isMultimodalMain() {
+						rt.ImageMode = tools.ImageModeDataURL
+					} else {
+						rt.ImageMode = tools.ImageModeHint
+					}
+				}
+			}
+
 			// Let ESC/Ctrl+C cancel propagate into the bash command so an
 			// interrupt kills long-running commands immediately (not just at
 			// the next turn boundary).
@@ -1443,6 +1463,101 @@ func (a *Agent) useCoT() bool {
 	return a.isCoTModel() && a.thinking != ThinkOff
 }
 
+// isMultimodalMain reports whether the ACTIVE main model can see images
+// directly (read tool returns base64 data URLs). Text models get the
+// vision-tool hint instead.
+func (a *Agent) isMultimodalMain() bool {
+	if info := a.ModelInfo(); info != nil {
+		return info.Multimodal
+	}
+	return false
+}
+
+// runVision is the injected runner for the vision tool. It reads the image
+// file, sends it to the configured multimodal model (default mimo-v2.5 on
+// opencode-go) with an optional prompt, and returns the model's text answer
+// for the main agent to continue from.
+func (a *Agent) runVision(path, prompt string) (string, error) {
+	// Read + validate the image.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	mime := tools.ImageMime(path)
+	if mime == "" {
+		return "", fmt.Errorf("%s is not an image (png/jpg/jpeg/gif/webp/bmp)", path)
+	}
+	if len(data) > tools.MaxImageBytes {
+		return "", fmt.Errorf("image too large: %d bytes (max %d)", len(data), tools.MaxImageBytes)
+	}
+
+	// Resolve vision model config: OPENCODE_API_KEY (+ optional
+	// PIGO_VISION_MODEL / PIGO_VISION_BASE_URL), falling back to the active
+	// provider's key and the current model.
+	key := os.Getenv("OPENCODE_API_KEY")
+	if key == "" {
+		key = a.cfg.APIKey
+	}
+	if key == "" {
+		return "", fmt.Errorf("vision model not configured: set OPENCODE_API_KEY (see /login opencode-go, then /reload)")
+	}
+	model := os.Getenv("PIGO_VISION_MODEL")
+	if model == "" {
+		model = a.cfg.VisionModel
+	}
+	if model == "" {
+		model = "mimo-v2.5"
+	}
+	base := os.Getenv("PIGO_VISION_BASE_URL")
+	if base == "" {
+		base = "https://opencode.ai/zen/go"
+	}
+
+	if prompt == "" {
+		prompt = "Describe this image in detail, including any text, UI elements, layout, colors, and notable details."
+	}
+
+	// Build the OpenAI-compatible vision request (image_url content block).
+	userContent := []interface{}{
+		map[string]interface{}{
+			"type": "image_url",
+			"image_url": map[string]interface{}{
+				"url": "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data),
+			},
+		},
+		map[string]interface{}{"type": "text", "text": prompt},
+	}
+	req := &llm.DSRequest{
+		Model: model,
+		Messages: []llm.DSMessage{
+			{Role: "system", Content: "You are a vision assistant. Analyze the image and return a concise, accurate description in the same language the user's question uses."},
+			{Role: "user", Content: userContent},
+		},
+		MaxTokens: 2048,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	client := llm.NewDeepSeekClient(key, base)
+	var content, reasoning strings.Builder
+	if _, err := client.SendStreamWithContext(ctx, req,
+		func(r string) { reasoning.WriteString(r) },
+		func(c string) { content.WriteString(c) },
+	); err != nil {
+		return "", fmt.Errorf("vision API: %w", err)
+	}
+
+	out := strings.TrimSpace(content.String())
+	if out == "" {
+		out = strings.TrimSpace(reasoning.String())
+	}
+	if out == "" {
+		return "", fmt.Errorf("vision model returned an empty response")
+	}
+	return out, nil
+}
+
 func (a *Agent) SelfIterate(ctx context.Context) error {
 	a.SetMode(ModeSelfIterate)
 	fmt.Println("🔁 Self-Iteration Mode — improving PiGo...")
@@ -1513,6 +1628,8 @@ func (a *Agent) Reload() (string, error) {
 	a.registry.Register(&tools.LsTool{})
 	a.registry.Register(&tools.GrepTool{})
 	a.registry.Register(&tools.FindTool{})
+	// Re-wire the vision sub-agent tool (runner reads live env vars).
+	a.registry.Register(&tools.VisionTool{Runner: a.runVision})
 	reloaded = append(reloaded, "tools")
 
 	// 3. Re-read config (API key might have changed in .env)
@@ -1624,7 +1741,7 @@ func loadContextFiles(home string) string {
 	}
 
 	if len(parts) == 0 {
-		return "You are PiGo — a coding agent in Go.\nTools: read, write, edit, bash, grep, find, ls.\nBe concise. Use edit for changes.\n\n## Docs\nCheck `docs/` for pi design reference & feature specs.\n"
+		return "You are PiGo — a coding agent in Go.\nTools: read, write, edit, bash, grep, find, ls, vision.\nBe concise. Use edit for changes. Use the `vision` tool to analyze image files.\n\n## Docs\nCheck `docs/` for pi design reference & feature specs.\n"
 	}
 
 	return strings.Join(parts, "\n\n")
@@ -1878,6 +1995,9 @@ func toolArgPreview(tu llm.ContentBlock) string {
 		if path == "" || path == "." {
 			return "."
 		}
+		return filepath.Base(path)
+	case "vision":
+		path, _ := tu.Input["path"].(string)
 		return filepath.Base(path)
 	}
 	return ""
