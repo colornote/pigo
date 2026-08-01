@@ -96,10 +96,11 @@ Config is loaded from `~/.pigo/.env` (global) and `./.env` (project, overrides).
 
 | Variable | Default | Description |
 |---|---|---|
-| `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `PIGO_API_KEY` | — | API key (any of the three works) |
-| `PIGO_MODEL` | `deepseek-v4-flash` | Default model |
-| `PIGO_BASE_URL` | `https://api.deepseek.com/anthropic` | Anthropic-compatible endpoint for tool calling |
-| `PIGO_DS_BASE_URL` | `https://api.deepseek.com` | Native DeepSeek endpoint for CoT/reasoner |
+| `PIGO_PROVIDER` | `deepseek` | Active provider: `deepseek` or `opencode-go` |
+| `DEEPSEEK_API_KEY` / `OPENCODE_API_KEY` / `ANTHROPIC_API_KEY` / `PIGO_API_KEY` | — | API key (provider's own key wins) |
+| `PIGO_MODEL` | provider default (`deepseek-v4-flash`) | Default model |
+| `PIGO_BASE_URL` | per provider | Anthropic-compatible endpoint for tool calling |
+| `PIGO_DS_BASE_URL` | per provider | Native OpenAI-compatible endpoint (CoT / key verification) |
 | `PIGO_THINKING` | `medium` | Default thinking level: `off/low/medium/high/max` |
 | `PIGO_MAX_TURNS` | `50` | Max agent loop iterations per request |
 | `PIGO_WORKDIR` | cwd | Working directory (shown to the model) |
@@ -107,17 +108,32 @@ Config is loaded from `~/.pigo/.env` (global) and `./.env` (project, overrides).
 | `PIGO_AUTOREPAIR` | `false` | Auto-repair on error (`true`) |
 | `PIGO_DEBUG` | — | Dump API requests to stderr (`1`) |
 
+## Providers
+
+| Provider | ID | API key | Models |
+|---|---|---|---|
+| DeepSeek | `deepseek` (default) | `DEEPSEEK_API_KEY` | `deepseek-v4-flash`, `deepseek-v4-pro[1m]`, `deepseek-chat`, `deepseek-reasoner` 🧠 |
+| OpenCode Go | `opencode-go` | `OPENCODE_API_KEY` | 16 curated open models incl. DeepSeek V4, Kimi, GLM, Qwen, MiniMax, Grok (`/models` to list) |
+
+[OpenCode Go](https://opencode.ai/go) is a low-cost subscription ($5 first month, then $10/month) giving reliable access to popular open coding models; it is API-key compatible like any other provider.
+
+- Switch providers with `/provider <id>`, `--provider <id>`, or `PIGO_PROVIDER`
+- `/model <name>` auto-switches provider when the model belongs to another one
+- `/login` walks through provider selection, key verification, and persistence
+
 ## Models
 
 | Model | Description | CoT |
 |---|---|---|
 | `deepseek-v4-flash` | V4 Flash — fast, default | |
 | `deepseek-v4-pro[1m]` | V4 Pro 1M — long context | |
-| `deepseek-v4-pro` | alias → `deepseek-v4-pro[1m]` | |
+| `deepseek-v4-pro` | alias → `deepseek-v4-pro[1m]` (deepseek) / real model (opencode-go) | |
 | `deepseek-chat` | Chat — general | |
 | `deepseek-reasoner` | Reasoner — deep reasoning | 🧠 online CoT streaming |
 
-Switch at runtime with `/model <name>`; list with `/models`. Only `deepseek-reasoner` (with thinking ≠ off) uses the native CoT path — everything else uses the Anthropic-compatible tool-calling loop.
+OpenCode Go adds `deepseek-v4-pro`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k3`, `qwen3.7-max/plus`, `qwen3.6-plus`, `glm-5.2/5.1`, `minimax-m3/m2.7`, `mimo-v2.5(-pro)`, `hy3`, `grok-4.5` — run `/models` or `pigo --list-models` for the full list. All opencode-go models route through the Anthropic-compatible endpoint so the full tool loop works.
+
+Switch at runtime with `/model <name>`; list with `/models`. Only models flagged 🧠 (native `reasoning_content` CoT) use the native CoT path — everything else uses the Anthropic-compatible tool-calling loop.
 
 ---
 
@@ -144,8 +160,9 @@ Usage: pigo [options] [@files...] [prompt]
 
 | Command | Description |
 |---|---|
-| `/model <name>` | Switch model |
-| `/models` | List available models |
+| `/model <name>` | Switch model (auto-switches provider if needed) |
+| `/models` | List models of the active provider |
+| `/provider [id]` | Show / switch provider |
 | `/thinking <lvl>` | Set thinking: `off/low/medium/high/max` |
 | `/self` | 🔁 **Self-iterate**: read source → improve → rebuild |
 | `/repair <desc>` | 🔧 Auto-repair a bug from a description |
