@@ -173,6 +173,189 @@ func (t *EditTool) Execute(input map[string]interface{}) *Result {
 	return &Result{Success: true, Output: fmt.Sprintf("Replaced in %s", path)}
 }
 
+// ─── Edit diff preview (pi-style line diff) ────────────────────
+
+// PreviewEdit computes a line-level diff of applying oldText→newText to the
+// file at path, WITHOUT modifying it. The returned text uses pi's display
+// format: "+<lineno> content" / "-<lineno> content" / " <lineno> context"
+// (4 lines around each change) and "..." for skipped runs. Callers render
+// colors themselves.
+func PreviewEdit(path, oldText, newText string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	content := string(data)
+	if !strings.Contains(content, oldText) {
+		return "", fmt.Errorf("oldText not found")
+	}
+	newContent := strings.Replace(content, oldText, newText, 1)
+	return DiffLines(content, newContent, 4), nil
+}
+
+// DiffLines renders a display-oriented line diff between two texts.
+// Format mirrors pi's generateDiffString: line numbers prefixed with
+// '+', '-' or ' ' (context), '...' for skipped context runs.
+func DiffLines(oldContent, newContent string, contextLines int) string {
+	oldLines := strings.Split(strings.ReplaceAll(oldContent, "\r\n", "\n"), "\n")
+	newLines := strings.Split(strings.ReplaceAll(newContent, "\r\n", "\n"), "\n")
+	// Trailing split artifact.
+	if len(oldLines) > 0 && oldLines[len(oldLines)-1] == "" {
+		oldLines = oldLines[:len(oldLines)-1]
+	}
+	if len(newLines) > 0 && newLines[len(newLines)-1] == "" {
+		newLines = newLines[:len(newLines)-1]
+	}
+
+	ops := lineDiffOps(oldLines, newLines)
+
+	lineNumWidth := len(fmt.Sprintf("%d", maxInt(len(oldLines), len(newLines))))
+	out := make([]string, 0, len(ops))
+
+	ctxLine := func(n int, text string) string {
+		return " " + fmt.Sprintf("%*d", lineNumWidth, n) + " " + text
+	}
+	chgLine := func(kind byte, n int, text string) string {
+		return string(kind) + fmt.Sprintf("%*d", lineNumWidth, n) + " " + text
+	}
+
+	// Group ops into runs: context runs alternate with change runs.
+	var runs [][]lineDiffOp
+	var cur []lineDiffOp
+	for _, op := range ops {
+		if len(cur) > 0 && ((cur[0].kind == ' ') != (op.kind == ' ')) {
+			runs = append(runs, cur)
+			cur = nil
+		}
+		cur = append(cur, op)
+	}
+	if len(cur) > 0 {
+		runs = append(runs, cur)
+	}
+
+	for ri, run := range runs {
+		if run[0].kind == ' ' {
+			// Context run: show context around neighbouring changes only
+			// (pi semantics: isolated context runs are skipped entirely).
+			hasLeading := ri > 0
+			hasTrailing := ri < len(runs)-1
+			if !hasLeading && !hasTrailing {
+				continue
+			}
+			if hasLeading && hasTrailing {
+				if len(run) <= contextLines*2 {
+					for _, op := range run {
+						out = append(out, ctxLine(op.oldLine, op.text))
+					}
+				} else {
+					for _, op := range run[:contextLines] {
+						out = append(out, ctxLine(op.oldLine, op.text))
+					}
+					out = append(out, " "+strings.Repeat(" ", lineNumWidth)+" ...")
+					for _, op := range run[len(run)-contextLines:] {
+						out = append(out, ctxLine(op.oldLine, op.text))
+					}
+				}
+			} else if hasLeading {
+				// Trailing context after the last change: skip-marker + tail.
+				if len(run) > contextLines {
+					out = append(out, " "+strings.Repeat(" ", lineNumWidth)+" ...")
+				}
+				for _, op := range run[maxInt(0, len(run)-contextLines):] {
+					out = append(out, ctxLine(op.oldLine, op.text))
+				}
+			} else {
+				// Leading context before the first change: head + skip-marker.
+				for _, op := range run[:minInt(contextLines, len(run))] {
+					out = append(out, ctxLine(op.oldLine, op.text))
+				}
+				if len(run) > contextLines {
+					out = append(out, " "+strings.Repeat(" ", lineNumWidth)+" ...")
+				}
+			}
+			continue
+		}
+		// Change run: removed lines (old numbers) then added lines (new numbers).
+		for _, op := range run {
+			switch op.kind {
+			case '-':
+				out = append(out, chgLine('-', op.oldLine, op.text))
+			case '+':
+				out = append(out, chgLine('+', op.newLine, op.text))
+			}
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// lineDiffOp is one line-level diff operation.
+type lineDiffOp struct {
+	kind    byte // ' ' keep, '-' remove, '+' add
+	text    string
+	oldLine int // 1-based line in the old file (0 = n/a)
+	newLine int // 1-based line in the new file (0 = n/a)
+}
+
+// lineDiffOps computes line-level LCS diff between a and b, pairing
+// removals and additions into adjacent runs.
+func lineDiffOps(a, b []string) []lineDiffOp {
+	// LCS table (int instead of bool to reconstruct).
+	n, m := len(a), len(b)
+	dp := make([][]int, n+1)
+	for i := range dp {
+		dp[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if a[i] == b[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+
+	var ops []lineDiffOp
+	i, j, oi, nj := 0, 0, 1, 1
+	for i < n && j < m {
+		if a[i] == b[j] {
+			ops = append(ops, lineDiffOp{' ', a[i], oi, nj})
+			i, j, oi, nj = i+1, j+1, oi+1, nj+1
+		} else if dp[i+1][j] >= dp[i][j+1] {
+			ops = append(ops, lineDiffOp{'-', a[i], oi, 0})
+			i, oi = i+1, oi+1
+		} else {
+			ops = append(ops, lineDiffOp{'+', b[j], 0, nj})
+			j, nj = j+1, nj+1
+		}
+	}
+	for i < n {
+		ops = append(ops, lineDiffOp{'-', a[i], oi, 0})
+		i, oi = i+1, oi+1
+	}
+	for j < m {
+		ops = append(ops, lineDiffOp{'+', b[j], 0, nj})
+		j, nj = j+1, nj+1
+	}
+	return ops
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // ─── BashTool ────────────────────────────────────────────────────
 
 // ANSI colors for the bash countdown display.
