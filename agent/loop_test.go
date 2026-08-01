@@ -1,11 +1,11 @@
 package agent
 
 import (
-	"context"
 	"strings"
 	"testing"
 
 	"pigo/config"
+	"pigo/llm"
 )
 
 func newTestConfig(sessDir, sessName string) *config.Config {
@@ -79,7 +79,12 @@ func TestSetAPIKeyPreservesSession(t *testing.T) {
 	if a.Session() == nil {
 		t.Fatal("expected a session")
 	}
-	a.Run(context.Background(), "hi") // no API call happens — key empty is fine, but messages get appended
+	// Simulate one exchanged turn WITHOUT hitting the network (a.Run would
+	// issue a real API call against the provider endpoint).
+	a.messages = append(a.messages, llm.Message{
+		Role:    "user",
+		Content: []llm.TextContent{{Type: "text", Text: "hi"}},
+	})
 	msgCount := len(a.messages)
 	oldClient := a.client
 

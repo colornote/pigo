@@ -253,12 +253,11 @@ func (m *markdownStream) flushTable() {
 // ─── block renderers ───────────────────────────────────────────
 
 func renderHeading(text string, level int) string {
-	mark := "#"
 	repeat := level
 	if repeat > 6 {
 		repeat = 6
 	}
-	mark = strings.Repeat("#", repeat)
+	mark := strings.Repeat("#", repeat)
 	// H1 gets a divider line under it.
 	s := ANSICyan + ANSIBold + mark + " " + renderInline(strings.TrimSpace(text)) + ANSIReset + "\n"
 	if level == 1 {
@@ -282,7 +281,7 @@ func renderListItem(text string) string {
 	if len(trimmed) > 0 && (trimmed[0] == '-' || trimmed[0] == '*' || trimmed[0] == '+') {
 		marker = ANSICyan + "•" + ANSIReset
 		body = strings.TrimSpace(trimmed[1:])
-	} else if i := 0; i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+	} else if len(trimmed) > 0 && trimmed[0] >= '0' && trimmed[0] <= '9' {
 		// numbered list: keep the number
 		j := 0
 		for j < len(trimmed) && (trimmed[j] >= '0' && trimmed[j] <= '9' || trimmed[j] == '.') {
