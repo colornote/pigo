@@ -20,13 +20,13 @@ func writeTempImage(t *testing.T, dir, name string, content []byte) string {
 }
 
 // TestReadToolImageDataURL verifies reading an image file returns a base64
-// data URL instead of raw binary.
+// data URL when the read tool is in ImageModeDataURL (multimodal main model).
 func TestReadToolImageDataURL(t *testing.T) {
 	dir := t.TempDir()
 	raw := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01}
 	path := writeTempImage(t, dir, "shot.png", raw)
 
-	r := &ReadTool{}
+	r := &ReadTool{ImageMode: ImageModeDataURL}
 	res := r.Execute(map[string]interface{}{"path": path})
 	if !res.Success {
 		t.Fatalf("read failed: %s", res.Error)
@@ -34,6 +34,26 @@ func TestReadToolImageDataURL(t *testing.T) {
 	want := "data:image/png;base64," + base64.StdEncoding.EncodeToString(raw)
 	if res.Output != want {
 		t.Errorf("output mismatch:\n got %q\nwant %q", res.Output, want)
+	}
+}
+
+// TestReadToolImageHint verifies the default (hint) mode returns a pointer
+// to the vision tool instead of a base64 blob — text main models can't read
+// base64, so the raw image bytes would be token garbage.
+func TestReadToolImageHint(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTempImage(t, dir, "shot.png", []byte{0x89, 0x50, 0x4E, 0x47, 0x01})
+
+	r := &ReadTool{} // zero value → hint mode
+	res := r.Execute(map[string]interface{}{"path": path})
+	if !res.Success {
+		t.Fatalf("read failed: %s", res.Error)
+	}
+	if !strings.Contains(res.Output, "vision tool") {
+		t.Errorf("expected vision-tool hint, got: %q", res.Output)
+	}
+	if strings.Contains(res.Output, "base64,") {
+		t.Errorf("hint mode must not leak base64 data: %q", res.Output)
 	}
 }
 
@@ -65,8 +85,8 @@ func TestReadToolImageMimeTypes(t *testing.T) {
 		"a":      "",
 	}
 	for name, want := range cases {
-		if got := imageMime(name); got != want {
-			t.Errorf("imageMime(%q) = %q, want %q", name, got, want)
+		if got := ImageMime(name); got != want {
+			t.Errorf("ImageMime(%q) = %q, want %q", name, got, want)
 		}
 	}
 }

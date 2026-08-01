@@ -45,9 +45,10 @@ pigo/
 - [x] `goodbye()` no longer creates an empty session on `--help`/`--version`/`--list-models`
 - [x] `/login` / `/logout` — pick provider → paste API key → verify against native API (`GET /models`) → persist to `~/.pigo/.env` (0600) → hot-apply via `agent.SetAPIKey()` (session/messages/model untouched). DeepSeek only for now; provider registry in `agent/providers.go` is extensible.
 - [x] Multimodal vision — opencode-go `mimo-v2.5` / `mimo-v2.5-pro` (verified against `opencode.ai/zen/go/v1/models`). `read` returns image files (png/jpg/jpeg/gif/webp/bmp ≤5MB) as base64 data URLs; the agent loop converts them to Anthropic `image` content blocks (OpenAI protocol: `image_url`) so vision models see the picture.
+- [x] Vision sub-agent tool (`vision`) — a global tool that calls a multimodal model (default `mimo-v2.5` on opencode-go, configurable via `PIGO_VISION_MODEL` / `PIGO_VISION_BASE_URL`, auth `OPENCODE_API_KEY`) to analyze an image and return a text description to the MAIN agent. Text models (DeepSeek) never see raw base64: `read` returns a `[Image: … use the vision tool …]` hint for text main models (`ImageModeHint`) and a base64 data URL only for multimodal main models (`ImageModeDataURL`). Runner injected by `agent.New`/`Reload` (`tools.VisionTool.Runner`), tools package stays free of llm imports.
 
 ## Tools Policy
-- **7 tools: read, write, edit, bash, grep, find, ls**
+- **8 tools: read, write, edit, bash, grep, find, ls, vision**
 - grep/find/ls were re-added (commit 705ad4c) — they're useful for the model
 - No evidence of infinite loops with current prompt constraints
 

@@ -135,20 +135,39 @@ OpenCode Go adds `deepseek-v4-pro`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k3`, `q
 
 ### Vision (multimodal)
 
-`mimo-v2.5` and `mimo-v2.5-pro` (Xiaomi MiMo V2.5, opencode-go) accept image inputs.
-Point the model at a picture and it will read it with the `read` tool:
+Two ways to work with images:
+
+**1. Vision sub-agent tool (recommended with text models like DeepSeek).**
+The `vision` tool is a global bridge to the multimodal `mimo-v2.5` model on
+opencode-go. Your main agent (e.g. DeepSeek) calls it like any other tool; the
+vision model reads the image and returns a text description the main agent
+continues from:
 
 ```bash
-pigo --provider opencode-go --model mimo-v2.5 "Read screenshot.png and describe the UI"
+# Set the vision key once:
+#   export OPENCODE_API_KEY=oc-...   (or /login opencode-go, then /reload)
+
+# Then just point the main agent at an image:
+pigo "Read screenshot.png and describe the UI"
+pigo "What does docs/architecture.png show? Can you spot any issues?"
 ```
+
+The main agent uses `vision <path> [question]`; no provider switch needed.
+
+**2. Direct multimodal model.** `mimo-v2.5` / `mimo-v2.5-pro` as the *main*
+model see images via the `read` tool:
 
 ```bash
-pigo --model mimo-v2.5 "What does docs/architecture.png show?"
+pigo --model mimo-v2.5 "Read screenshot.png and describe the UI"
 ```
 
-The `read` tool returns image files (png/jpg/jpeg/gif/webp/bmp, ≤5MB) as base64
-data URLs, which the agent converts to `image_url` content blocks for the
-model. Switch back with `/model deepseek-v4-flash`.
+Configuration (optional — defaults shown):
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENCODE_API_KEY` | — | Vision model auth (also used by opencode-go) |
+| `PIGO_VISION_MODEL` | `mimo-v2.5` | Vision sub-agent model |
+| `PIGO_VISION_BASE_URL` | `https://opencode.ai/zen/go` | Vision endpoint |
 
 Switch at runtime with `/model <name>`; list with `/models`. Only models flagged 🧠 (native `reasoning_content` CoT) use the native CoT path — everything else uses the Anthropic-compatible tool-calling loop.
 

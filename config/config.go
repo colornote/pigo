@@ -25,6 +25,9 @@ type Config struct {
 	Continue       bool   // continue latest session
 	AutoRepair     bool   // auto-trigger repair on error without asking
 	Print          bool   // -p/--print: non-interactive, print response and exit
+	// VisionModel is the vision sub-agent model used by the `vision` tool
+	// (default: mimo-v2.5 on opencode-go). Auth comes from OPENCODE_API_KEY.
+	VisionModel string
 }
 
 // LoadSystemPrompt re-derives the system prompt from context files.
@@ -72,6 +75,7 @@ func Load() *Config {
 		WorkDir:       getEnv("PIGO_WORKDIR", ""),
 		MaxTurns:      getEnvInt("PIGO_MAX_TURNS", 50),
 		AutoRepair:    getEnvBool("PIGO_AUTOREPAIR"),
+		VisionModel:   getEnv("PIGO_VISION_MODEL", ""),
 	}
 }
 
