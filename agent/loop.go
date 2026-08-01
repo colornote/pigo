@@ -297,7 +297,7 @@ func (a *Agent) ResumeSession(s *session.Session) error {
 				pendingToolResults = append(pendingToolResults, map[string]interface{}{
 					"type":        "tool_result",
 					"tool_use_id": entry.ToolUseID,
-					"content":     entry.Content,
+					"content":     toolResultContent(entry.Content),
 				})
 			} else {
 				// Legacy format — no tool_use_id, convert to text
@@ -812,7 +812,7 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 
 			toolResults[i] = map[string]interface{}{
 				"type": "tool_result", "tool_use_id": tu.ID,
-				"content": resultJSON,
+				"content": toolResultContent(resultJSON),
 			}
 			a.saveEntry("tool", resultJSON, tu.ID)
 		}
@@ -1088,6 +1088,77 @@ func isToolResultMessage(m llm.Message) bool {
 	return len(collectToolResultIDs(m.Content)) > 0
 }
 
+// imageDataURL parses a "data:image/png;base64,..." string into
+// (mediaType, base64Data). ok is false for anything that isn't an image
+// data URL (plain text, other schemes, non-base64 encoding).
+func imageDataURL(s string) (mime, data string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(s, prefix) {
+		return "", "", false
+	}
+	idx := strings.Index(s, ";base64,")
+	if idx < 0 {
+		return "", "", false
+	}
+	mime = s[len(prefix):idx]
+	if !strings.HasPrefix(mime, "image/") {
+		return "", "", false
+	}
+	return mime, s[idx+len(";base64,"):], true
+}
+
+// imageBlockFromDataURL converts an image data URL into an Anthropic-style
+// image content block ({"type":"image","source":{...}}), or nil when s is
+// not an image data URL.
+func imageBlockFromDataURL(s string) interface{} {
+	mime, data, ok := imageDataURL(s)
+	if !ok {
+		return nil
+	}
+	return map[string]interface{}{
+		"type": "image",
+		"source": map[string]interface{}{
+			"type":       "base64",
+			"media_type": mime,
+			"data":       data,
+		},
+	}
+}
+
+// toolResultContent builds the `content` field of a tool_result block.
+// Image data URLs (from the read tool on image files) become a single image
+// content block so multimodal models can see the picture; everything else
+// stays a plain string.
+func toolResultContent(s string) interface{} {
+	if img := imageBlockFromDataURL(s); img != nil {
+		return []interface{}{img}
+	}
+	return s
+}
+
+// openAIImageBlocks converts an Anthropic-style image content block
+// (map with "type":"image" and a base64 source) into OpenAI-style
+// image_url blocks. Returns nil when the block isn't a valid image.
+func openAIImageBlocks(block map[string]interface{}) []interface{} {
+	src, _ := block["source"].(map[string]interface{})
+	if src == nil {
+		return nil
+	}
+	mime, _ := src["media_type"].(string)
+	data, _ := src["data"].(string)
+	if mime == "" || data == "" {
+		return nil
+	}
+	return []interface{}{
+		map[string]interface{}{
+			"type": "image_url",
+			"image_url": map[string]interface{}{
+				"url": "data:" + mime + ";base64," + data,
+			},
+		},
+	}
+}
+
 // extractToolResults returns the content strings of tool_result blocks.
 func extractToolResults(content interface{}) []string {
 	list, _ := content.([]interface{})
@@ -1236,7 +1307,9 @@ func (a *Agent) buildOpenAIToolDefs() []llm.DSTool {
 // messagesToOpenAI converts the internal (Anthropic-shaped) message list to
 // OpenAI chat-completions format, prepending the system prompt. user
 // tool_result blocks become role=tool messages; assistant tool_use blocks
-// become tool_calls entries.
+// become tool_calls entries. Image content blocks (Anthropic "image" form)
+// are converted to OpenAI "image_url" blocks so multimodal models like
+// mimo-v2.5 can see pictures read via the read tool.
 func (a *Agent) messagesToOpenAI(sysPrompt string) []llm.DSMessage {
 	var out []llm.DSMessage
 	if sysPrompt != "" {
@@ -1246,6 +1319,12 @@ func (a *Agent) messagesToOpenAI(sysPrompt string) []llm.DSMessage {
 		switch m.Role {
 		case "user":
 			var text strings.Builder
+			flushText := func() {
+				if text.Len() > 0 {
+					out = append(out, llm.DSMessage{Role: "user", Content: text.String()})
+					text.Reset()
+				}
+			}
 			for _, block := range contentBlocks(m.Content) {
 				switch b := block.(type) {
 				case llm.TextContent:
@@ -1256,16 +1335,40 @@ func (a *Agent) messagesToOpenAI(sysPrompt string) []llm.DSMessage {
 						if s, ok := b["text"].(string); ok {
 							text.WriteString(s)
 						}
+					case "image":
+						// Anthropic image block → OpenAI image_url block. Flush
+						// any accumulated text first so ordering is preserved.
+						flushText()
+						out = append(out, llm.DSMessage{Role: "user", Content: openAIImageBlocks(b)})
 					case "tool_result":
 						id, _ := b["tool_use_id"].(string)
-						content, _ := b["content"].(string)
-						out = append(out, llm.DSMessage{Role: "tool", ToolCallID: id, Content: content})
+						switch content := b["content"].(type) {
+						case string:
+							out = append(out, llm.DSMessage{Role: "tool", ToolCallID: id, Content: content})
+						case []interface{}:
+							// Content blocks (image from the read tool, plus any text).
+							var blocks []interface{}
+							for _, blk := range content {
+								switch cb := blk.(type) {
+								case map[string]interface{}:
+									switch cb["type"] {
+									case "text":
+										if s, ok := cb["text"].(string); ok {
+											blocks = append(blocks, map[string]interface{}{"type": "text", "text": s})
+										}
+									case "image":
+										blocks = append(blocks, openAIImageBlocks(cb)...)
+									}
+								}
+							}
+							if len(blocks) > 0 {
+								out = append(out, llm.DSMessage{Role: "tool", ToolCallID: id, Content: blocks})
+							}
+						}
 					}
 				}
 			}
-			if text.Len() > 0 {
-				out = append(out, llm.DSMessage{Role: "user", Content: text.String()})
-			}
+			flushText()
 		case "assistant":
 			ds := llm.DSMessage{Role: "assistant"}
 			var text strings.Builder

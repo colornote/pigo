@@ -146,6 +146,19 @@ var OpenCodeGoProvider = Provider{
 			Reasoning: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
 			Pricing: llm.ModelPricing{InputPrice: 0.435, OutputPrice: 0.87, CacheHit: 0.003625},
 		},
+		// Xiaomi MiMo V2.5 — multimodal (vision): reads images via the read
+		// tool (data URLs → image content blocks). Model id verified against
+		// opencode.ai/zen/go/v1/models.
+		"mimo-v2.5": {
+			ID: "mimo-v2.5", Name: "MiMo V2.5", Description: "多模态 · 图像理解",
+			Reasoning: true, Multimodal: true, ContextWindow: 128_000, MaxTokens: 16_384,
+			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.0028},
+		},
+		"mimo-v2.5-pro": {
+			ID: "mimo-v2.5-pro", Name: "MiMo V2.5 Pro", Description: "多模态 · 更强推理",
+			Reasoning: true, Multimodal: true, ContextWindow: 128_000, MaxTokens: 32_768,
+			Pricing: llm.ModelPricing{InputPrice: 0.2, OutputPrice: 0.4, CacheHit: 0.004},
+		},
 	},
 }
 

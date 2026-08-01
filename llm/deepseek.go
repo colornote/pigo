@@ -40,10 +40,11 @@ type DSFunctionCall struct {
 }
 
 // DSMessage is a message in DeepSeek's native format. Content is a plain
-// string; tool interactions use ToolCallID / ToolCalls.
+// string (or a content-block array for multimodal messages — image_url
+// blocks); tool interactions use ToolCallID / ToolCalls.
 type DSMessage struct {
 	Role             string       `json:"role"` // system/user/assistant/tool
-	Content          string       `json:"content"`
+	Content          interface{}  `json:"content"`
 	ReasoningContent string       `json:"reasoning_content,omitempty"`
 	ToolCallID       string       `json:"tool_call_id,omitempty"`
 	ToolCalls        []DSToolCall `json:"tool_calls,omitempty"`

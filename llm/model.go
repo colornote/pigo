@@ -17,6 +17,7 @@ type ModelInfo struct {
 	Description   string       // short description shown in /models
 	Reasoning     bool         // model supports thinking / chain-of-thought
 	CoT           bool         // use the native OpenAI-compatible CoT path (PiGo runCoT, no tools)
+	Multimodal    bool         // accepts image inputs (read tool returns data URLs → image content blocks)
 	ContextWindow int          // max context window in tokens
 	MaxTokens     int          // max output tokens the API accepts
 	Pricing       ModelPricing // USD per 1M tokens

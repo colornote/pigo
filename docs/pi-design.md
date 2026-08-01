@@ -44,6 +44,7 @@ pigo/
 - [x] `-p` with no prompt/stdin errors instead of silently entering interactive mode
 - [x] `goodbye()` no longer creates an empty session on `--help`/`--version`/`--list-models`
 - [x] `/login` / `/logout` — pick provider → paste API key → verify against native API (`GET /models`) → persist to `~/.pigo/.env` (0600) → hot-apply via `agent.SetAPIKey()` (session/messages/model untouched). DeepSeek only for now; provider registry in `agent/providers.go` is extensible.
+- [x] Multimodal vision — opencode-go `mimo-v2.5` / `mimo-v2.5-pro` (verified against `opencode.ai/zen/go/v1/models`). `read` returns image files (png/jpg/jpeg/gif/webp/bmp ≤5MB) as base64 data URLs; the agent loop converts them to Anthropic `image` content blocks (OpenAI protocol: `image_url`) so vision models see the picture.
 
 ## Tools Policy
 - **7 tools: read, write, edit, bash, grep, find, ls**
@@ -68,3 +69,8 @@ pigo/
   instead of falling back to bash.
 - Bash output gutter (`agent/loop.go` `displayBashOutput`): truncation message now
   reports the real total line count (was counting the truncated slice).
+- Image data URLs in tool results: session JSONL stores the raw data URL
+  (`a.saveEntry("tool", resultJSON, …)`), and `ResumeSession` rebuilds the image
+  content block via `toolResultContent()` — so images survive session resume
+  and compaction. `estimateTokens()` ignores image blocks (no text to count),
+  which keeps base64 blobs out of the compaction transcript.

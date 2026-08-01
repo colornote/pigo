@@ -133,6 +133,23 @@ Config is loaded from `~/.pigo/.env` (global) and `./.env` (project, overrides).
 
 OpenCode Go adds `deepseek-v4-pro`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k3`, `qwen3.7-max/plus`, `qwen3.6-plus`, `glm-5.2/5.1`, `minimax-m3/m2.7`, `mimo-v2.5(-pro)`, `hy3`, `grok-4.5` — run `/models` or `pigo --list-models` for the full list. All opencode-go models route through the Anthropic-compatible endpoint so the full tool loop works.
 
+### Vision (multimodal)
+
+`mimo-v2.5` and `mimo-v2.5-pro` (Xiaomi MiMo V2.5, opencode-go) accept image inputs.
+Point the model at a picture and it will read it with the `read` tool:
+
+```bash
+pigo --provider opencode-go --model mimo-v2.5 "Read screenshot.png and describe the UI"
+```
+
+```bash
+pigo --model mimo-v2.5 "What does docs/architecture.png show?"
+```
+
+The `read` tool returns image files (png/jpg/jpeg/gif/webp/bmp, ≤5MB) as base64
+data URLs, which the agent converts to `image_url` content blocks for the
+model. Switch back with `/model deepseek-v4-flash`.
+
 Switch at runtime with `/model <name>`; list with `/models`. Only models flagged 🧠 (native `reasoning_content` CoT) use the native CoT path — everything else uses the Anthropic-compatible tool-calling loop.
 
 ---
