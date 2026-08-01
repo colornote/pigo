@@ -51,11 +51,19 @@ type DSMessage struct {
 
 // DSRequest is a request to DeepSeek's native /v1/chat/completions
 type DSRequest struct {
-	Model     string      `json:"model"`
-	Messages  []DSMessage `json:"messages"`
-	Stream    bool        `json:"stream"`
-	MaxTokens int         `json:"max_tokens,omitempty"`
-	Tools     []DSTool    `json:"tools,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []DSMessage    `json:"messages"`
+	Stream        bool           `json:"stream"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Tools         []DSTool       `json:"tools,omitempty"`
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+}
+
+// StreamOptions mirrors OpenAI's stream_options. IncludeUsage requests the
+// server to include a final usage chunk in streaming responses — without it,
+// OpenAI-compatible gateways (opencode.ai/zen/go) omit usage entirely.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // DSToolCallDelta is a partial tool call inside a streaming delta.
@@ -124,6 +132,7 @@ func (c *DeepSeekClient) SendStream(req *DSRequest, onReasoning CoTCallback, onC
 func (c *DeepSeekClient) SendStreamWithTools(ctx context.Context, req *DSRequest,
 	onReasoning CoTCallback, onContent func(string)) (string, []DSToolCall, error) {
 	req.Stream = true
+	req.StreamOptions = &StreamOptions{IncludeUsage: true}
 	if os.Getenv("PIGO_DEBUG") == "1" {
 		dbg, _ := json.MarshalIndent(req, "", "  ")
 		fmt.Fprintf(os.Stderr, "\n[DS REQUEST]\n%s\n", string(dbg))
@@ -233,11 +242,7 @@ func (c *DeepSeekClient) SendStreamWithTools(ctx context.Context, req *DSRequest
 
 		// Capture usage from the final chunk
 		if chunk.Usage != nil {
-			c.TotalUsage.InputTokens += chunk.Usage.InputTokens
-			c.TotalUsage.OutputTokens += chunk.Usage.OutputTokens
-			c.TotalUsage.CacheHitTokens += chunk.Usage.CacheHitTokens
-			c.TotalUsage.CacheMissTokens += chunk.Usage.CacheMissTokens
-			c.TotalUsage.CacheWriteTokens += chunk.Usage.CacheWriteTokens
+			c.TotalUsage = addUsage(c.TotalUsage, *chunk.Usage)
 		}
 	}
 
@@ -284,6 +289,7 @@ func (c *DeepSeekClient) SendStreamWithTools(ctx context.Context, req *DSRequest
 // SendStreamWithContext is like SendStream but with context support for cancellation.
 func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSRequest, onReasoning CoTCallback, onContent func(string)) (string, error) {
 	req.Stream = true
+	req.StreamOptions = &StreamOptions{IncludeUsage: true}
 	if os.Getenv("PIGO_DEBUG") == "1" {
 		dbg, _ := json.MarshalIndent(req, "", "  ")
 		fmt.Fprintf(os.Stderr, "\n[DS REQUEST]\n%s\n", string(dbg))
@@ -354,11 +360,7 @@ func (c *DeepSeekClient) SendStreamWithContext(ctx context.Context, req *DSReque
 
 		// Capture usage from the final chunk
 		if chunk.Usage != nil {
-			c.TotalUsage.InputTokens += chunk.Usage.InputTokens
-			c.TotalUsage.OutputTokens += chunk.Usage.OutputTokens
-			c.TotalUsage.CacheHitTokens += chunk.Usage.CacheHitTokens
-			c.TotalUsage.CacheMissTokens += chunk.Usage.CacheMissTokens
-			c.TotalUsage.CacheWriteTokens += chunk.Usage.CacheWriteTokens
+			c.TotalUsage = addUsage(c.TotalUsage, *chunk.Usage)
 		}
 	}
 

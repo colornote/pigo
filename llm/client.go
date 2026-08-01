@@ -301,13 +301,25 @@ func (c *Client) SendStreamWithContext(ctx context.Context, req *Request, onText
 	return &result, scanner.Err()
 }
 
-// addUsage accumulates usage
+// addUsage accumulates usage. It normalizes the endpoint-specific field
+// names (Anthropic: input_tokens/output_tokens; OpenAI: prompt_tokens/
+// completion_tokens) and all three cache-naming conventions into the
+// canonical InputTokens/OutputTokens/Cache* totals.
 func addUsage(total, delta Usage) Usage {
-	total.InputTokens += delta.InputTokens
-	total.OutputTokens += delta.OutputTokens
-	// Cache info from DeepSeek's anthropic-compatible API
-	total.CacheHitTokens += delta.CacheHitTokens
-	total.CacheMissTokens += delta.CacheMissTokens
-	total.CacheWriteTokens += delta.CacheWriteTokens
+	// Normalize token counts: prefer the Anthropic form, fall back to the
+	// OpenAI form when the endpoint used prompt/completion naming.
+	in, out := delta.InputTokens, delta.OutputTokens
+	if in == 0 && delta.PromptTokens > 0 {
+		in = delta.PromptTokens
+	}
+	if out == 0 && delta.CompletionTokens > 0 {
+		out = delta.CompletionTokens
+	}
+	total.InputTokens += in
+	total.OutputTokens += out
+	// Cache info from all conventions (whichever endpoint sent).
+	total.CacheHitTokens += delta.CacheHitTokens + delta.CacheReadTokens + delta.PromptCacheHitTokens
+	total.CacheMissTokens += delta.CacheMissTokens + delta.PromptCacheMissTokens
+	total.CacheWriteTokens += delta.CacheWriteTokens + delta.CacheCreationTokens + delta.PromptCacheWriteTokens
 	return total
 }
