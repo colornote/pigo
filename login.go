@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -117,8 +119,11 @@ func handleLogin() {
 	}
 	os.Setenv(provider.EnvKey, key) // visible to this process + child processes
 
-	// ── 5. Apply to the running agent immediately ──
-	ag.SetAPIKey(key)
+	// ── 5. Apply to the running agent immediately (switches provider + rebuilds clients) ──
+	if !ag.SwitchProvider(provider.ID) {
+		fmt.Printf("%s✗ 无法切换到 provider %s%s\n", ANSIRed, provider.ID, ANSIReset)
+		return
+	}
 
 	fmt.Printf("\n%s✓ 已登录 %s%s%s\n", ANSIGreen, ANSIReset, ANSIBold, provider.Name)
 	fmt.Printf("  %sAPI Key 已保存到 %s%s\n", ANSIGray, envPath, ANSIReset)
@@ -126,14 +131,16 @@ func handleLogin() {
 		ANSIGray, ANSIGreen, ag.Model(), ANSIReset, ANSIYellow, ANSIReset, ANSIReset)
 }
 
-// handleLogout removes the stored API key from ~/.pigo/.env and the running
-// agent. The key set via external shell env vars is untouched.
+// handleLogout removes the stored API key for the ACTIVE provider from
+// ~/.pigo/.env and the running agent. Keys set via external shell env vars
+// are untouched.
 func handleLogout() {
 	home, _ := os.UserHomeDir()
 	envPath := filepath.Join(home, ".pigo", ".env")
+	provider := agent.ProviderByID(ag.ProviderID())
 	keyVar := "DEEPSEEK_API_KEY"
-	if p := agent.ProviderByID("deepseek"); p != nil {
-		keyVar = p.EnvKey
+	if provider != nil && provider.EnvKey != "" {
+		keyVar = provider.EnvKey
 	}
 	if err := removeEnvKey(envPath, keyVar); err != nil {
 		fmt.Printf("%s✗ 移除 API Key 失败: %v%s\n", ANSIRed, err, ANSIReset)
@@ -158,18 +165,30 @@ func confirmLogin(question string) bool {
 	return strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes")
 }
 
-// verifyProviderKey checks the key against the provider's native API
-// (DeepSeek: GET /models). Providers without a native endpoint skip
-// verification. Returns ok=true when the key is accepted.
+// verifyProviderKey checks the key against the provider's OpenAI-compatible
+// chat endpoint with a minimal request (POST {DSBaseURL}/v1/chat/completions,
+// max_tokens=1). GET /models is NOT reliable: opencode.ai serves it without
+// authenticating. Providers without a native endpoint skip verification.
+// Returns ok=true when the key is accepted.
 func verifyProviderKey(p *agent.Provider, key string) (bool, error) {
 	base := strings.TrimRight(p.DSBaseURL, "/")
 	if base == "" {
 		return true, nil // no native endpoint — nothing to verify against
 	}
-	req, err := http.NewRequest("GET", base+"/models", nil)
+	model := p.DefaultModel
+	if model == "" {
+		model = "deepseek-chat"
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"model":      model,
+		"max_tokens": 1,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+	})
+	req, err := http.NewRequest("POST", base+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return false, err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)

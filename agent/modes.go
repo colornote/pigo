@@ -33,44 +33,6 @@ const (
 	ThinkMax    ThinkingLevel = "max"
 )
 
-// DeepSeek 可用模型
-var DeepSeekModels = map[string]string{
-	"deepseek-v4-flash":   "V4 Flash — 快速",
-	"deepseek-v4-pro[1m]": "V4 Pro 1M — 长上下文",
-	"deepseek-v4-pro":     "V4 Pro 1M — 别名 → v4-pro[1m]",
-	"deepseek-chat":       "Chat — 通用",
-	"deepseek-reasoner":   "Reasoner — 深度推理",
-}
-
-// NormalizeModel maps model aliases to their canonical API names.
-func NormalizeModel(name string) string {
-	switch name {
-	case "deepseek-v4-pro":
-		return "deepseek-v4-pro[1m]"
-	}
-	return name
-}
-
-// CoTModels lists models that support Chain-of-Thought streaming
-var CoTModels = map[string]bool{
-	"deepseek-reasoner": true,
-}
-
-// ShortModelName returns a compact display alias for a model (prompt status bar).
-func ShortModelName(model string) string {
-	switch {
-	case strings.Contains(model, "flash"):
-		return "flash"
-	case strings.Contains(model, "pro"):
-		return "v4pro"
-	case strings.Contains(model, "reasoner"):
-		return "reasoner"
-	case strings.Contains(model, "chat"):
-		return "chat"
-	}
-	return model
-}
-
 // BuildSystemPrompt 根据模式生成提示词
 func BuildSystemPrompt(mode Mode, contextInfo string) string {
 	return BuildSystemPromptWithDir(mode, contextInfo, "")

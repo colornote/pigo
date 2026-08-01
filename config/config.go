@@ -9,9 +9,10 @@ import (
 
 type Config struct {
 	APIKey         string
+	ProviderID     string // active provider id (PIGO_PROVIDER, default "deepseek")
 	Model          string
 	BaseURL        string
-	DSBaseURL      string // native DeepSeek API (CoT/reasoner)
+	DSBaseURL      string // native OpenAI-compatible API (CoT/reasoner)
 	ThinkingLevel  string
 	SystemPrompt   string
 	WorkDir        string
@@ -38,17 +39,34 @@ func (c *Config) LoadSystemPrompt() {
 	c.SystemPrompt = loadSystemPrompt(home)
 }
 
+// providerEnvKeys maps provider id → primary API key env var. Kept in
+// config (duplicated from agent's registry) so config.Load can resolve the
+// right key without importing agent (which would create an import cycle).
+var providerEnvKeys = map[string]string{
+	"deepseek":    "DEEPSEEK_API_KEY",
+	"opencode-go": "OPENCODE_API_KEY",
+}
+
+// EnvKeyFor returns the primary API key environment variable of a provider.
+// Exported so main's --provider flag can re-resolve the key after switching.
+func EnvKeyFor(providerID string) string {
+	return providerEnvKeys[providerID]
+}
+
 func Load() *Config {
 	// 1. Load .env files (home then cwd, cwd overrides)
 	home, _ := os.UserHomeDir()
 	loadEnvFile(filepath.Join(home, ".pigo", ".env"))
 	loadEnvFile(".env")
 
+	providerID := getEnv("PIGO_PROVIDER", "deepseek")
+
 	return &Config{
-		APIKey:        lookupKey(),
-		Model:         getEnv("PIGO_MODEL", "deepseek-v4-flash"),
-		BaseURL:       getEnv("PIGO_BASE_URL", "https://api.deepseek.com/anthropic"),
-		DSBaseURL:     getEnv("PIGO_DS_BASE_URL", "https://api.deepseek.com"),
+		APIKey:        lookupKey(providerID),
+		ProviderID:    providerID,
+		Model:         getEnv("PIGO_MODEL", ""),
+		BaseURL:       getEnv("PIGO_BASE_URL", ""),
+		DSBaseURL:     getEnv("PIGO_DS_BASE_URL", ""),
 		ThinkingLevel: getEnv("PIGO_THINKING", "medium"),
 		SystemPrompt:  loadSystemPrompt(home),
 		WorkDir:       getEnv("PIGO_WORKDIR", ""),
@@ -100,8 +118,14 @@ func loadSystemPrompt(home string) string {
 	return "You are PiGo. Use read/write/edit/bash."
 }
 
-func lookupKey() string {
-	for _, k := range []string{"DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "PIGO_API_KEY"} {
+func lookupKey(providerID string) string {
+	// Provider's own key first, then generic fallbacks.
+	keys := []string{}
+	if k := providerEnvKeys[providerID]; k != "" {
+		keys = append(keys, k)
+	}
+	keys = append(keys, "ANTHROPIC_API_KEY", "PIGO_API_KEY")
+	for _, k := range keys {
 		if v := os.Getenv(k); v != "" {
 			return strings.TrimSpace(v)
 		}

@@ -18,6 +18,9 @@ import (
 
 type Agent struct {
 	cfg            *config.Config
+	provider       *Provider
+	baseURL        string // resolved Anthropic endpoint (provider default or env override)
+	dsBaseURL      string // resolved OpenAI-compatible endpoint
 	client         *llm.Client
 	deepseekClient *llm.DeepSeekClient // native API for CoT/reasoner
 	registry       *tools.Registry
@@ -33,8 +36,31 @@ type Agent struct {
 }
 
 func New(cfg *config.Config) *Agent {
-	client := llm.New(cfg.APIKey, cfg.BaseURL, cfg.Model)
-	dsClient := llm.NewDeepSeekClient(cfg.APIKey, cfg.DSBaseURL)
+	provider := ProviderByID(cfg.ProviderID)
+	if provider == nil {
+		provider = ProviderByID("deepseek")
+		cfg.ProviderID = provider.ID // keep cfg consistent with the active provider
+	}
+	// Endpoint URLs: env overrides win, otherwise the provider defaults.
+	// cfg.BaseURL holds the USER's explicit value (env or empty); the
+	// resolved endpoint lives in the Agent so later rebuilds (SwitchModel /
+	// SetAPIKey / SwitchProvider) never confuse a resolved URL with a user
+	// override.
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = provider.BaseURL
+	}
+	dsBaseURL := cfg.DSBaseURL
+	if dsBaseURL == "" {
+		dsBaseURL = provider.DSBaseURL
+	}
+	// Model: must exist on the active provider, otherwise the provider default.
+	model := provider.Resolve(cfg.Model)
+	if model != cfg.Model {
+		cfg.Model = model
+	}
+	client := llm.New(cfg.APIKey, baseURL, model)
+	dsClient := llm.NewDeepSeekClient(cfg.APIKey, dsBaseURL)
 	reg := tools.NewRegistry()
 	reg.Register(&tools.ReadTool{})
 	reg.Register(&tools.WriteTool{})
@@ -58,6 +84,9 @@ func New(cfg *config.Config) *Agent {
 
 	a := &Agent{
 		cfg:            cfg,
+		provider:       provider,
+		baseURL:        baseURL,
+		dsBaseURL:      dsBaseURL,
 		client:         client,
 		deepseekClient: dsClient,
 		registry:       reg,
@@ -86,12 +115,56 @@ func (a *Agent) SetThinking(level ThinkingLevel) {
 }
 func (a *Agent) Thinking() ThinkingLevel { return a.thinking }
 
-func (a *Agent) SwitchModel(name string) {
-	normalized := NormalizeModel(name)
+func (a *Agent) SwitchModel(name string) bool {
+	normalized := a.provider.NormalizeModel(name)
+	if _, ok := a.provider.Models[normalized]; !ok {
+		return false
+	}
 	a.cfg.Model = normalized
-	a.client = llm.New(a.cfg.APIKey, a.cfg.BaseURL, normalized)
+	a.client = llm.New(a.cfg.APIKey, a.baseURL, normalized)
 	a.client.TotalUsage = llm.Usage{}
 	a.deepseekClient.TotalUsage = llm.Usage{}
+	return true
+}
+
+// SwitchProvider switches the active provider, rebuilding both API clients
+// against the new provider's endpoints. The API key is re-read from the
+// provider's environment variable (already set by /login or the user's
+// shell), and the model falls back to the provider default when the current
+// model doesn't exist there. Message history, session, and thinking level
+// are preserved.
+func (a *Agent) SwitchProvider(id string) bool {
+	p := ProviderByID(id)
+	if p == nil {
+		return false
+	}
+	prevKey := a.cfg.APIKey
+	a.provider = p
+	a.cfg.ProviderID = p.ID
+	// Endpoints: env overrides win, otherwise provider defaults. Only the
+	// resolved Agent endpoints change; cfg keeps the user's explicit values.
+	a.baseURL = envOr(os.Getenv("PIGO_BASE_URL"), p.BaseURL)
+	a.dsBaseURL = envOr(os.Getenv("PIGO_DS_BASE_URL"), p.DSBaseURL)
+	// API key: the provider's own env var wins; fall back to the current
+	// key (e.g. from --api-key) or the generic env vars.
+	a.cfg.APIKey = lookupKeyFromEnvFor(p)
+	if a.cfg.APIKey == "" {
+		a.cfg.APIKey = prevKey
+	}
+	// Model: keep current if it exists on the new provider, else default.
+	a.cfg.Model = p.Resolve(a.cfg.Model)
+	a.client = llm.New(a.cfg.APIKey, a.baseURL, a.cfg.Model)
+	a.deepseekClient = llm.NewDeepSeekClient(a.cfg.APIKey, a.dsBaseURL)
+	a.client.TotalUsage = llm.Usage{}
+	a.deepseekClient.TotalUsage = llm.Usage{}
+	return true
+}
+
+func envOr(v, fallback string) string {
+	if v != "" {
+		return v
+	}
+	return fallback
 }
 
 // SetAPIKey updates the API key on the running agent's clients without
@@ -99,13 +172,32 @@ func (a *Agent) SwitchModel(name string) {
 // Used by /login so the new key takes effect immediately.
 func (a *Agent) SetAPIKey(key string) {
 	a.cfg.APIKey = key
-	a.client = llm.New(key, a.cfg.BaseURL, a.cfg.Model)
-	a.deepseekClient = llm.NewDeepSeekClient(key, a.cfg.DSBaseURL)
+	a.client = llm.New(key, a.baseURL, a.cfg.Model)
+	a.deepseekClient = llm.NewDeepSeekClient(key, a.dsBaseURL)
 	a.client.TotalUsage = llm.Usage{}
 	a.deepseekClient.TotalUsage = llm.Usage{}
 }
 
+// BaseURL returns the resolved Anthropic-compatible endpoint of the active
+// provider (provider default, or PIGO_BASE_URL override).
+func (a *Agent) BaseURL() string { return a.baseURL }
+
+// DSBaseURL returns the resolved OpenAI-compatible endpoint.
+func (a *Agent) DSBaseURL() string { return a.dsBaseURL }
+
 func (a *Agent) Model() string { return a.cfg.Model }
+
+// ProviderID returns the active provider id.
+func (a *Agent) ProviderID() string { return a.provider.ID }
+
+// ProviderName returns the display name of the active provider.
+func (a *Agent) ProviderName() string { return a.provider.Name }
+
+// Provider returns the active provider descriptor.
+func (a *Agent) Provider() *Provider { return a.provider }
+
+// ModelInfo returns the info for the current model, or nil.
+func (a *Agent) ModelInfo() *llm.ModelInfo { return a.provider.Model(a.cfg.Model) }
 
 // ─── Session Management ──────────────────────────────────────────
 
@@ -380,24 +472,21 @@ func (a *Agent) TotalUsage() llm.Usage {
 
 func (a *Agent) Footer() {
 	usage := a.TotalUsage()
-	model := a.Model()
-	thinking := a.Thinking()
-	ctxWindow := llm.GetContextWindow(model)
+	info := a.ModelInfo()
+	ctxWindow := 0
+	if info != nil {
+		ctxWindow = info.ContextWindow
+	}
 	pct := 0.0
 	if ctxWindow > 0 {
 		pct = float64(usage.InputTokens) / float64(ctxWindow) * 100
 	}
-	cost := usage.CostUSD(model)
+	cost := usage.CostUSD(info)
 
-	displayModel := model
-	if strings.Contains(model, "v4-pro") {
-		displayModel = "V4 Pro 1M"
-	} else if strings.Contains(model, "flash") {
-		displayModel = "V4 Flash"
-	} else if strings.Contains(model, "chat") {
-		displayModel = "Chat"
-	} else if strings.Contains(model, "reasoner") {
-		displayModel = "Reasoner"
+	// Model display name: provider name + model name (e.g. "OpenCode Go · DeepSeek V4 Flash").
+	displayModel := a.provider.Name
+	if info != nil && info.Name != "" {
+		displayModel += " · " + info.Name
 	}
 
 	dir := a.cfg.WorkDir
@@ -416,9 +505,9 @@ func (a *Agent) Footer() {
 	}
 	// Build footer as colored segments for CJK-aware width truncation.
 	segs := []colorSeg{
-		{fmt.Sprintf("DeepSeek %s", displayModel), ANSIBold},
+		{fmt.Sprintf("%s", displayModel), ANSIBold},
 		{" | ", ANSIGray},
-		{fmt.Sprintf("think:%s", thinking), ANSIGray},
+		{fmt.Sprintf("think:%s", a.Thinking()), ANSIGray},
 		{" | ", ANSIGray},
 		{dir, ANSIGray},
 		{sessIndicator, ANSIGray},
@@ -499,14 +588,7 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 			sysPrompt += "\n\n" + a.gitContext
 		}
 		maxTok := thinkingTokens[a.thinking]
-
-		req := &llm.Request{
-			Model:     a.cfg.Model,
-			MaxTokens: maxTok,
-			System:    sysPrompt,
-			Messages:  a.messages,
-			Tools:     a.buildToolDefs(),
-		}
+		openAI := a.useOpenAIProtocol()
 
 		// Track streaming state
 		var (
@@ -560,7 +642,46 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		// Show "thinking..." indicator on stderr while waiting
 		fmt.Fprintf(os.Stderr, "%s⏳ thinking...%s", ANSIGray, ANSIReset)
 
-		resp, err := a.client.SendStreamWithContext(ctx, req, onText, onTool, onThinking)
+		var resp *llm.Response
+		var apiErr error
+		if openAI {
+			// OpenAI-compatible endpoint (opencode.ai/zen/go for DeepSeek family):
+			// tools use `parameters`, tool results are role=tool messages, and the
+			// model answers with tool_calls.
+			dsReq := &llm.DSRequest{
+				Model:     a.cfg.Model,
+				Messages:  a.messagesToOpenAI(sysPrompt),
+				MaxTokens: maxTok,
+				Tools:     a.buildOpenAIToolDefs(),
+			}
+			text, calls, err := a.deepseekClient.SendStreamWithTools(ctx, dsReq, onThinking, onText)
+			apiErr = err
+			resp = &llm.Response{}
+			if text != "" {
+				resp.Content = append(resp.Content, llm.ContentBlock{Type: "text", Text: text})
+			}
+			for _, c := range calls {
+				var input map[string]interface{}
+				if err := json.Unmarshal([]byte(c.Function.Arguments), &input); err != nil || input == nil {
+					input = map[string]interface{}{}
+				}
+				resp.Content = append(resp.Content, llm.ContentBlock{
+					Type: "tool_use", ID: c.ID, Name: c.Function.Name, Input: input,
+				})
+				if onTool != nil {
+					onTool(c.Function.Name, c.ID)
+				}
+			}
+		} else {
+			req := &llm.Request{
+				Model:     a.cfg.Model,
+				MaxTokens: maxTok,
+				System:    sysPrompt,
+				Messages:  a.messages,
+				Tools:     a.buildToolDefs(),
+			}
+			resp, apiErr = a.client.SendStreamWithContext(ctx, req, onText, onTool, onThinking)
+		}
 
 		// Clear thinking indicator if still showing
 		if !firstToken {
@@ -573,8 +694,8 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 			}
 		}
 
-		if err != nil {
-			return "", fmt.Errorf("API: %w", err)
+		if resp == nil {
+			return "", fmt.Errorf("API: %w", apiErr)
 		}
 
 		// Collect text and tool_use blocks from the response
@@ -879,11 +1000,11 @@ func (a *Agent) shouldAutoCompact() bool {
 	if len(a.messages) < 14 {
 		return false
 	}
-	window := llm.GetContextWindow(a.cfg.Model)
-	if window <= 0 {
+	info := a.ModelInfo()
+	if info == nil || info.ContextWindow <= 0 {
 		return false
 	}
-	return a.estimateTokens() > int(float64(window)*0.85)
+	return a.estimateTokens() > int(float64(info.ContextWindow)*0.85)
 }
 
 // estimateTokens roughly estimates the token count of the message history
@@ -1042,21 +1163,163 @@ func extractTextContent(content interface{}) string {
 }
 
 func (a *Agent) buildToolDefs() []llm.Tool {
+	format := ""
+	if a.provider != nil {
+		format = a.provider.ToolsFormat
+	}
+	// Model-level ToolsFormat (if set) wins over the provider default —
+	// opencode.ai/zen/go routes different models to different upstreams
+	// that each accept only one tool-schema style.
+	if info := a.ModelInfo(); info != nil && info.ToolsFormat != "" {
+		format = info.ToolsFormat
+	}
+	openAI := format == "openai"
 	var defs []llm.Tool
 	for _, t := range a.registry.List() {
-		defs = append(defs, llm.Tool{
-			Name: t.Name(), Description: t.Description(), InputSchema: t.Schema(),
+		def := llm.Tool{Name: t.Name(), Description: t.Description()}
+		if openAI {
+			def.Parameters = t.Schema()
+		} else {
+			def.InputSchema = t.Schema()
+		}
+		defs = append(defs, def)
+	}
+	return defs
+}
+
+// useOpenAIProtocol reports whether the active model talks to an
+// OpenAI-compatible /v1/chat/completions endpoint (tool schema: parameters,
+// messages: role=tool, response: tool_calls) instead of the Anthropic
+// /v1/messages protocol. opencode.ai/zen/go routes the DeepSeek family
+// through the OpenAI endpoint only.
+func (a *Agent) useOpenAIProtocol() bool {
+	if info := a.ModelInfo(); info != nil && info.ToolsFormat != "" {
+		return info.ToolsFormat == "openai"
+	}
+	return a.provider != nil && a.provider.ToolsFormat == "openai"
+}
+
+// buildOpenAIToolDefs builds OpenAI-style function tools from the registry.
+func (a *Agent) buildOpenAIToolDefs() []llm.DSTool {
+	var defs []llm.DSTool
+	for _, t := range a.registry.List() {
+		defs = append(defs, llm.DSTool{
+			Type: "function",
+			Function: llm.DSToolFunction{
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  t.Schema(),
+			},
 		})
 	}
 	return defs
 }
 
-func (a *Agent) isReasonerModel() bool {
-	return strings.Contains(a.cfg.Model, "reasoner")
+// messagesToOpenAI converts the internal (Anthropic-shaped) message list to
+// OpenAI chat-completions format, prepending the system prompt. user
+// tool_result blocks become role=tool messages; assistant tool_use blocks
+// become tool_calls entries.
+func (a *Agent) messagesToOpenAI(sysPrompt string) []llm.DSMessage {
+	var out []llm.DSMessage
+	if sysPrompt != "" {
+		out = append(out, llm.DSMessage{Role: "system", Content: sysPrompt})
+	}
+	for _, m := range a.messages {
+		switch m.Role {
+		case "user":
+			var text strings.Builder
+			for _, block := range contentBlocks(m.Content) {
+				switch b := block.(type) {
+				case llm.TextContent:
+					text.WriteString(b.Text)
+				case map[string]interface{}:
+					switch b["type"] {
+					case "text":
+						if s, ok := b["text"].(string); ok {
+							text.WriteString(s)
+						}
+					case "tool_result":
+						id, _ := b["tool_use_id"].(string)
+						content, _ := b["content"].(string)
+						out = append(out, llm.DSMessage{Role: "tool", ToolCallID: id, Content: content})
+					}
+				}
+			}
+			if text.Len() > 0 {
+				out = append(out, llm.DSMessage{Role: "user", Content: text.String()})
+			}
+		case "assistant":
+			ds := llm.DSMessage{Role: "assistant"}
+			var text strings.Builder
+			for _, block := range contentBlocks(m.Content) {
+				switch b := block.(type) {
+				case llm.TextContent:
+					text.WriteString(b.Text)
+				case llm.ToolUseContent:
+					args, _ := json.Marshal(b.Input)
+					ds.ToolCalls = append(ds.ToolCalls, llm.DSToolCall{
+						ID:   b.ID,
+						Type: "function",
+						Function: llm.DSFunctionCall{
+							Name:      b.Name,
+							Arguments: string(args),
+						},
+					})
+				case map[string]interface{}:
+					switch b["type"] {
+					case "text":
+						if s, ok := b["text"].(string); ok {
+							text.WriteString(s)
+						}
+					case "tool_use":
+						id, _ := b["id"].(string)
+						name, _ := b["name"].(string)
+						input, _ := b["input"].(map[string]interface{})
+						args, _ := json.Marshal(input)
+						ds.ToolCalls = append(ds.ToolCalls, llm.DSToolCall{
+							ID:   id,
+							Type: "function",
+							Function: llm.DSFunctionCall{
+								Name:      name,
+								Arguments: string(args),
+							},
+						})
+					}
+				}
+			}
+			ds.Content = text.String()
+			out = append(out, ds)
+		}
+	}
+	return out
+}
+
+// contentBlocks normalizes message content into a []interface{} of blocks.
+func contentBlocks(content interface{}) []interface{} {
+	switch c := content.(type) {
+	case []interface{}:
+		return c
+	case []llm.TextContent:
+		out := make([]interface{}, len(c))
+		for i, v := range c {
+			out[i] = v
+		}
+		return out
+	case string:
+		return []interface{}{llm.TextContent{Type: "text", Text: c}}
+	}
+	return nil
+}
+
+func (a *Agent) isCoTModel() bool {
+	if info := a.ModelInfo(); info != nil {
+		return info.CoT
+	}
+	return false
 }
 
 func (a *Agent) useCoT() bool {
-	return a.isReasonerModel() && a.thinking != ThinkOff
+	return a.isCoTModel() && a.thinking != ThinkOff
 }
 
 func (a *Agent) SelfIterate(ctx context.Context) error {
@@ -1132,11 +1395,11 @@ func (a *Agent) Reload() (string, error) {
 	reloaded = append(reloaded, "tools")
 
 	// 3. Re-read config (API key might have changed in .env)
-	newAPIKey := lookupKeyFromEnv()
+	newAPIKey := lookupKeyFromEnvFor(a.provider)
 	if newAPIKey != "" && newAPIKey != a.cfg.APIKey {
 		a.cfg.APIKey = newAPIKey
-		a.client = llm.New(a.cfg.APIKey, a.cfg.BaseURL, a.cfg.Model)
-		a.deepseekClient = llm.NewDeepSeekClient(a.cfg.APIKey, a.cfg.DSBaseURL)
+		a.client = llm.New(a.cfg.APIKey, a.baseURL, a.cfg.Model)
+		a.deepseekClient = llm.NewDeepSeekClient(a.cfg.APIKey, a.dsBaseURL)
 		reloaded = append(reloaded, "API credentials")
 	}
 
@@ -1246,14 +1509,25 @@ func loadContextFiles(home string) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// lookupKeyFromEnv reads API key from environment variables.
-func lookupKeyFromEnv() string {
-	for _, k := range []string{"DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "PIGO_API_KEY"} {
+// lookupKeyFromEnv reads API key from environment variables for a provider:
+// the provider's own env key first, then the generic fallbacks.
+func lookupKeyFromEnvFor(p *Provider) string {
+	keys := []string{}
+	if p != nil && p.EnvKey != "" {
+		keys = append(keys, p.EnvKey)
+	}
+	keys = append(keys, "ANTHROPIC_API_KEY", "PIGO_API_KEY")
+	for _, k := range keys {
 		if v := os.Getenv(k); v != "" {
 			return strings.TrimSpace(v)
 		}
 	}
 	return ""
+}
+
+// lookupKeyFromEnv reads the API key for the current provider from env.
+func lookupKeyFromEnv() string {
+	return lookupKeyFromEnvFor(ProviderByID("deepseek"))
 }
 
 // ─── Tool Display Helpers ──────────────────────────────────────

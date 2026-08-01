@@ -33,9 +33,14 @@ type ToolUseContent struct {
 }
 
 type Tool struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	InputSchema map[string]interface{} `json:"input_schema"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// InputSchema is the Anthropic-style tool schema (input_schema).
+	InputSchema map[string]interface{} `json:"input_schema,omitempty"`
+	// Parameters is the OpenAI-style tool schema (parameters). Some
+	// Anthropic-compatible gateways (e.g. opencode.ai/zen/go) only accept
+	// this form and reject input_schema with a 400.
+	Parameters map[string]interface{} `json:"parameters,omitempty"`
 }
 
 type Request struct {
@@ -151,6 +156,12 @@ func (c *Client) SendStreamWithContext(ctx context.Context, req *Request, onText
 	if os.Getenv("PIGO_DEBUG") == "1" {
 		dbg, _ := json.MarshalIndent(req, "", "  ")
 		fmt.Fprintf(os.Stderr, "\n[REQUEST]\n%s\n", string(dbg))
+		fmt.Fprintf(os.Stderr, "[ENDPOINT] %s\n", c.baseURL+"/v1/messages")
+		k := c.apiKey
+		if len(k) > 8 {
+			k = k[:4] + "…" + k[len(k)-4:]
+		}
+		fmt.Fprintf(os.Stderr, "[KEY] %s\n", k)
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -191,19 +202,30 @@ func (c *Client) SendStreamWithContext(ctx context.Context, req *Request, onText
 	var currentTool currentToolState
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
-
-		// Handle stream end
+		// Standard SSE: "data: {...}". Some Anthropic-compatible gateways
+		// (opencode.ai/zen/go) emit bare JSON events instead, plus "{}"
+		// keep-alive heartbeats — accept those too.
+		data := line
+		if strings.HasPrefix(line, "data:") {
+			data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		}
+		if data == "" {
+			continue
+		}
 		if data == "[DONE]" {
 			break
 		}
 
 		var event StreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+		// Skip keep-alive heartbeats ("{}" or events with no type).
+		if event.Type == "" {
 			continue
 		}
 

@@ -15,11 +15,38 @@ import (
 
 // ─── DeepSeek Native API types (for reasoner CoT support) ───
 
-// DSMessage is a message in DeepSeek's native format
+// DSTool is an OpenAI-style function tool definition.
+type DSTool struct {
+	Type     string         `json:"type"` // "function"
+	Function DSToolFunction `json:"function"`
+}
+
+type DSToolFunction struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters"`
+}
+
+// DSToolCall is a tool invocation returned by the model.
+type DSToolCall struct {
+	ID       string         `json:"id"`
+	Type     string         `json:"type"` // "function"
+	Function DSFunctionCall `json:"function"`
+}
+
+type DSFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
+}
+
+// DSMessage is a message in DeepSeek's native format. Content is a plain
+// string; tool interactions use ToolCallID / ToolCalls.
 type DSMessage struct {
-	Role             string `json:"role"`
-	Content          string `json:"content"`
-	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Role             string       `json:"role"` // system/user/assistant/tool
+	Content          string       `json:"content"`
+	ReasoningContent string       `json:"reasoning_content,omitempty"`
+	ToolCallID       string       `json:"tool_call_id,omitempty"`
+	ToolCalls        []DSToolCall `json:"tool_calls,omitempty"`
 }
 
 // DSRequest is a request to DeepSeek's native /v1/chat/completions
@@ -28,13 +55,25 @@ type DSRequest struct {
 	Messages  []DSMessage `json:"messages"`
 	Stream    bool        `json:"stream"`
 	MaxTokens int         `json:"max_tokens,omitempty"`
+	Tools     []DSTool    `json:"tools,omitempty"`
+}
+
+// DSToolCallDelta is a partial tool call inside a streaming delta.
+type DSToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id,omitempty"`
+	Function struct {
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+	} `json:"function"`
 }
 
 // DSDelta is the delta in a streaming chunk
 type DSDelta struct {
-	Role             string `json:"role,omitempty"`
-	Content          string `json:"content,omitempty"`
-	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Role             string            `json:"role,omitempty"`
+	Content          string            `json:"content,omitempty"`
+	ReasoningContent string            `json:"reasoning_content,omitempty"`
+	ToolCalls        []DSToolCallDelta `json:"tool_calls,omitempty"`
 }
 
 // DSChoice is a choice in the streaming response
@@ -76,6 +115,170 @@ type CoTCallback func(reasoning string)
 // SendStream sends a streaming request and returns the final content.
 func (c *DeepSeekClient) SendStream(req *DSRequest, onReasoning CoTCallback, onContent func(string)) (string, error) {
 	return c.SendStreamWithContext(context.Background(), req, onReasoning, onContent)
+}
+
+// SendStreamWithTools is like SendStreamWithContext but also assembles
+// OpenAI-style tool_calls from the stream (id + name + concatenated
+// arguments per index). Content text and reasoning are streamed via the
+// callbacks; the finished tool calls are returned with the content.
+func (c *DeepSeekClient) SendStreamWithTools(ctx context.Context, req *DSRequest,
+	onReasoning CoTCallback, onContent func(string)) (string, []DSToolCall, error) {
+	req.Stream = true
+	if os.Getenv("PIGO_DEBUG") == "1" {
+		dbg, _ := json.MarshalIndent(req, "", "  ")
+		fmt.Fprintf(os.Stderr, "\n[DS REQUEST]\n%s\n", string(dbg))
+		fmt.Fprintf(os.Stderr, "[ENDPOINT] %s\n", c.baseURL+"/v1/chat/completions")
+		k := c.apiKey
+		if len(k) > 8 {
+			k = k[:4] + "…" + k[len(k)-4:]
+		}
+		fmt.Fprintf(os.Stderr, "[KEY] %s\n", k)
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return "", nil, fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(b))
+	}
+
+	var fullContent strings.Builder
+	var fullReasoning strings.Builder
+	var inThink bool   // true when we're inside an inline CoT tag pair
+	var pending string // held-back bytes that may start a tag
+
+	// Tool-call assembly: partial deltas arrive per index.
+	type agg struct {
+		id   string
+		name string
+		args strings.Builder
+	}
+	aggs := map[int]*agg{}
+	order := []int{}
+
+	finishReason := ""
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk DSStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+			// Explicit reasoning_content field (native DeepSeek CoT)
+			if choice.Delta.ReasoningContent != "" {
+				fullReasoning.WriteString(choice.Delta.ReasoningContent)
+				if onReasoning != nil {
+					onReasoning(choice.Delta.ReasoningContent)
+				}
+			}
+
+			// Regular content — may include inline CoT tags
+			if choice.Delta.Content != "" {
+				c.processDelta(choice.Delta.Content, &inThink, &pending,
+					&fullReasoning, &fullContent,
+					onReasoning, onContent)
+			}
+
+			// Tool call deltas
+			for _, tc := range choice.Delta.ToolCalls {
+				a, ok := aggs[tc.Index]
+				if !ok {
+					a = &agg{}
+					aggs[tc.Index] = a
+					order = append(order, tc.Index)
+				}
+				if tc.ID != "" {
+					a.id = tc.ID
+				}
+				if tc.Function.Name != "" {
+					a.name = tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					a.args.WriteString(tc.Function.Arguments)
+				}
+			}
+		}
+
+		// Capture usage from the final chunk
+		if chunk.Usage != nil {
+			c.TotalUsage.InputTokens += chunk.Usage.InputTokens
+			c.TotalUsage.OutputTokens += chunk.Usage.OutputTokens
+			c.TotalUsage.CacheHitTokens += chunk.Usage.CacheHitTokens
+			c.TotalUsage.CacheMissTokens += chunk.Usage.CacheMissTokens
+			c.TotalUsage.CacheWriteTokens += chunk.Usage.CacheWriteTokens
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fullContent.String(), nil, fmt.Errorf("scan: %w", err)
+	}
+
+	// Flush any held-back partial tag at end of stream.
+	if pending != "" {
+		if inThink {
+			fullReasoning.WriteString(pending)
+			if onReasoning != nil {
+				onReasoning(pending)
+			}
+		} else {
+			fullContent.WriteString(pending)
+			if onContent != nil {
+				onContent(pending)
+			}
+		}
+	}
+
+	// Assemble tool calls in index order (only complete ones with an id).
+	var calls []DSToolCall
+	for _, idx := range order {
+		a := aggs[idx]
+		if a.id == "" || a.name == "" {
+			continue
+		}
+		calls = append(calls, DSToolCall{
+			ID:   a.id,
+			Type: "function",
+			Function: DSFunctionCall{
+				Name:      a.name,
+				Arguments: a.args.String(),
+			},
+		})
+	}
+	_ = finishReason
+
+	return fullContent.String(), calls, nil
 }
 
 // SendStreamWithContext is like SendStream but with context support for cancellation.

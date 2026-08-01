@@ -118,9 +118,22 @@ func main() {
 			cfg.NoContextFiles = true
 			cfg.LoadSystemPrompt()
 		case "--list-models":
-			printModels()
+			printAllModels()
 			goodbye()
 			return
+		case "--provider":
+			i++
+			if i < len(args) {
+				cfg.ProviderID = args[i]
+				// Full rebuild against the new provider (no provider preservation).
+				ag = agent.New(cfg)
+				// config.Load resolved the key for the DEFAULT provider; re-resolve
+				// it for the new provider (its own env var, then generic fallbacks).
+				if k := os.Getenv(config.EnvKeyFor(cfg.ProviderID)); k != "" {
+					cfg.APIKey = strings.TrimSpace(k)
+					ag.SetAPIKey(cfg.APIKey)
+				}
+			}
 		case "-p", "--print":
 			// Non-interactive: print response and exit (stdin is merged below)
 			cfg.Print = true
@@ -137,8 +150,15 @@ func main() {
 		case "--model":
 			i++
 			if i < len(args) {
-				if _, ok := agent.DeepSeekModels[args[i]]; ok {
-					ag.SwitchModel(args[i])
+				name := args[i]
+				if p := agent.ProviderForModel(name, ag.ProviderID()); p != nil {
+					if p.ID != ag.ProviderID() {
+						ag.SwitchProvider(p.ID)
+					}
+					ag.SwitchModel(name)
+				} else {
+					fmt.Fprintf(os.Stderr, "%s✗ Unknown model:%s %s (see %s--list-models%s)\n",
+						ANSIRed, ANSIReset, name, ANSIYellow, ANSIReset)
 				}
 			}
 		case "--thinking":
@@ -225,12 +245,14 @@ func main() {
 
 // recreateAgent rebuilds the agent after config-affecting flags change
 // (--no-session, --api-key, --session-dir), preserving the current
-// model and thinking level across the rebuild.
+// model and thinking level across the rebuild. The provider comes from
+// cfg.ProviderID — which SwitchProvider keeps in sync — so flags like
+// --provider (which rebuild via agent.New directly) never get reverted.
 func recreateAgent(cfg *config.Config) {
 	prevModel := ag.Model()
 	prevThinking := ag.Thinking()
 	ag = agent.New(cfg)
-	ag.SwitchModel(prevModel)
+	ag.SwitchModel(prevModel) // no-op when the model doesn't exist on the provider
 	ag.SetThinking(prevThinking)
 }
 
@@ -238,6 +260,7 @@ func recreateAgent(cfg *config.Config) {
 // No box drawing — avoids CJK width misalignment entirely.
 func printBanner() {
 	model := ag.Model()
+	provider := ag.ProviderName()
 	think := string(ag.Thinking())
 	dir := shorten(workDir(), 20)
 	sess := "(ephemeral)"
@@ -264,7 +287,7 @@ func printBanner() {
 	fmt.Printf("  %sπ%s %sPiGo%s %s%s%s   %s·  pi in Go — coding agent%s\n",
 		ANSICyan, ANSIReset, ANSIBold, ANSIReset,
 		ANSIGray, version, ANSIReset, ANSIGray, ANSIReset)
-	fmt.Printf("  %s  %s\n", lbl(left("model", model)), right("dir", dir))
+	fmt.Printf("  %s  %s\n", lbl(left("model", provider+" · "+model)), right("dir", dir))
 	fmt.Printf("  %s  %s\n", lbl(left("think", think)), right("session", sess))
 	fmt.Println(sep)
 	fmt.Println(cmds)
@@ -555,6 +578,7 @@ func showHelp() {
 	fmt.Printf("  --help, -h        Show this help\n")
 	fmt.Printf("  --version, -v     Show version\n")
 	fmt.Printf("  --model <name>    Set model for single-shot\n")
+	fmt.Printf("  --provider <id>   Set provider (deepseek, opencode-go)\n")
 	fmt.Printf("  --thinking <lvl>  Set thinking level\n")
 	fmt.Printf("  --print, -p       Non-interactive: print response and exit\n")
 	fmt.Printf("  --continue, -c    Continue most recent session\n")
@@ -571,9 +595,10 @@ func showHelp() {
 	fmt.Printf("  %spiped stdin%s         cat file | pigo -p \"prompt\" merges stdin\n", ANSIYellow, ANSIReset)
 	fmt.Printf("\n%sInteractive Commands:%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("  %s/login%s             Select provider, paste API key (saves to ~/.pigo/.env)\n", ANSIYellow, ANSIReset)
-	fmt.Printf("  %s/logout%s            Remove stored API key\n", ANSIYellow, ANSIReset)
-	fmt.Printf("  %s/model <name>%s     Switch model\n", ANSIYellow, ANSIReset)
-	fmt.Printf("  %s/models%s           List available models\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/logout%s            Remove the active provider's stored API key\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/model <name>%s     Switch model (auto-switches provider if needed)\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/models%s           List models of the active provider\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/provider [id]%s    Show / switch provider\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/thinking <lvl>%s   Set thinking: off/low/medium/high/max\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/self%s             Self-iterate & rebuild PiGo\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/repair <desc>%s    Auto-repair a bug\n", ANSIYellow, ANSIReset)
@@ -802,7 +827,7 @@ func runWithESC(input string, reader *bufio.Reader) {
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s✗ %v%s\n", ANSIRed, err, ANSIReset)
-		handleRunError(err)
+		handleRunError(err, reader)
 		return
 	}
 
@@ -890,18 +915,35 @@ func dispatch(input string, reader *bufio.Reader) {
 		printModels()
 
 	case input == "/model":
-		fmt.Printf("%sCurrent model:%s %s%s%s\n", ANSIBold, ANSIReset, ANSIGreen, ag.Model(), ANSIReset)
+		fmt.Printf("%sCurrent model:%s %s%s%s%s%s\n", ANSIBold, ANSIReset, ANSIGreen, ag.ProviderName(), ANSIReset, ANSIGray, " · "+ag.Model())
 		printModels()
-		fmt.Printf("%sUse %s/model <name>%s to switch.%s\n", ANSICyan, ANSIYellow, ANSICyan, ANSIReset)
+		fmt.Printf("%sUse %s/model <name>%s to switch, %s/provider <id>%s to change provider.%s\n", ANSICyan, ANSIYellow, ANSICyan, ANSIYellow, ANSICyan, ANSIReset)
 
 	case strings.HasPrefix(input, "/model "):
 		name := strings.TrimSpace(strings.TrimPrefix(input, "/model "))
-		if _, ok := agent.DeepSeekModels[name]; !ok {
-			fmt.Printf("%sUnknown model:%s %s. Use %s/models%s to list.\n", ANSIRed, ANSIReset, name, ANSIYellow, ANSIReset)
+		// A model that lives on another provider switches provider too.
+		if p := agent.ProviderForModel(name, ag.ProviderID()); p != nil {
+			if p.ID != ag.ProviderID() {
+				ag.SwitchProvider(p.ID)
+			}
+			if ag.SwitchModel(name) {
+				fmt.Printf("%s✓%s Model: %s%s%s%s%s%s\n", ANSIGreen, ANSIReset, ANSIBold, ag.ProviderName(), ANSIReset, ANSIGray, " · "+ag.Model(), ANSIReset)
+				return
+			}
+		}
+		fmt.Printf("%sUnknown model:%s %s. Use %s/models%s to list.%s\n", ANSIRed, ANSIReset, name, ANSIYellow, ANSIReset, ANSIReset)
+
+	case input == "/provider":
+		fmt.Printf("%sCurrent provider:%s %s%s%s%s%s\n", ANSIBold, ANSIReset, ANSIGreen, ag.ProviderName(), ANSIReset, ANSIGray, " ("+ag.ProviderID()+")")
+		printProviders()
+
+	case strings.HasPrefix(input, "/provider "):
+		id := strings.TrimSpace(strings.TrimPrefix(input, "/provider "))
+		if !ag.SwitchProvider(id) {
+			fmt.Printf("%sUnknown provider:%s %s. Use %s/provider%s to list.%s\n", ANSIRed, ANSIReset, id, ANSIYellow, ANSIReset, ANSIReset)
 			return
 		}
-		ag.SwitchModel(name)
-		fmt.Printf("%s✓%s Model: %s%s%s\n", ANSIGreen, ANSIReset, ANSIBold, name, ANSIReset)
+		fmt.Printf("%s✓%s Provider: %s%s%s%s%s%s\n", ANSIGreen, ANSIReset, ANSIBold, ag.ProviderName(), ANSIReset, ANSIGray, " · model "+ag.Model(), ANSIReset)
 
 	case strings.HasPrefix(input, "/thinking "):
 		level := strings.TrimSpace(strings.TrimPrefix(input, "/thinking "))
@@ -1027,6 +1069,7 @@ func dispatch(input string, reader *bufio.Reader) {
 		runRepair(desc, reader)
 
 	default:
+		lastDispatchInput = input
 		runWithESC(input, reader)
 	}
 }
@@ -1036,8 +1079,35 @@ func dispatch(input string, reader *bufio.Reader) {
 // ─── Auto-Repair Trigger ──────────────────────────────────────
 var autoRepairAttempt int
 
-func handleRunError(err error) {
+// lastDispatchInput is the most recent user prompt dispatched to the agent;
+// used to retry after transient API failures.
+var lastDispatchInput string
+
+// isAPIError reports whether err originates from the LLM API layer (auth,
+// rate limit, upstream failure) rather than from PiGo's own code or tools.
+// API errors must NOT trigger auto-repair — the agent can't fix a remote
+// outage by editing its own source.
+func isAPIError(msg string) bool {
+	return strings.HasPrefix(msg, "API: ") ||
+		strings.HasPrefix(msg, "CoT API: ") ||
+		strings.Contains(msg, "API error")
+}
+
+func handleRunError(err error, reader *bufio.Reader) {
 	errMsg := err.Error()
+
+	if isAPIError(errMsg) {
+		// Remote-side failure (bad key, rate limit, upstream outage).
+		// Offer a retry instead of auto-repair: the agent cannot fix a
+		// provider outage by editing its own code.
+		fmt.Fprintf(os.Stderr, "%s💡 %sAPI 错误%s — 检查 API key / 用量限制，或稍后重试（上游可能故障）。%sr%s 重试, Enter 继续%s\n",
+			ANSIGray, ANSIYellow, ANSIGray, ANSIYellow, ANSIGray, ANSIReset)
+		if readKey(10*time.Second) == "r" && lastDispatchInput != "" {
+			fmt.Fprintf(os.Stderr, "%s↻ 重试…%s\n", ANSIYellow, ANSIReset)
+			runWithESC(lastDispatchInput, reader)
+		}
+		return
+	}
 
 	if ag.AutoRepairEnabled() {
 		if autoRepairAttempt >= 3 {
@@ -1207,7 +1277,11 @@ func workDir() string {
 
 // promptStatus returns a compact model·thinking indicator for the prompt line.
 func promptStatus() string {
-	return agent.ShortModelName(ag.Model()) + "·" + shortThinking(string(ag.Thinking()))
+	p := ""
+	if ag.ProviderID() != "deepseek" {
+		p = "oc·" // opencode-go
+	}
+	return p + agent.ShortModelName(ag.Model()) + "·" + shortThinking(string(ag.Thinking()))
 }
 
 func shortThinking(t string) string {
@@ -1222,22 +1296,74 @@ func shortThinking(t string) string {
 	return t
 }
 
-// printModels lists available models with the active one marked.
-// Shared by /models, /model, and --list-models.
+// printAllModels lists every provider and its models (--list-models).
+func printAllModels() {
+	for i := range agent.Providers {
+		p := &agent.Providers[i]
+		mark := " "
+		if p.ID == ag.ProviderID() {
+			mark = "▶"
+		}
+		fmt.Printf("\n%s %s%s%s — %s%d models%s\n",
+			mark, ANSICyan, p.ID, ANSIReset, ANSIGray, len(p.Models), ANSIReset)
+		for _, name := range p.SortedModelNames() {
+			info := p.Model(name)
+			desc := ""
+			if info != nil {
+				desc = info.Description
+			}
+			fmt.Printf("   %-24s %s\n", name, desc)
+		}
+	}
+	fmt.Println()
+}
+
+// printModels lists the models of the ACTIVE provider with the active one
+// marked. Shared by /models, /model.
 func printModels() {
-	fmt.Printf("\n%sAvailable Models:%s\n", ANSIBold, ANSIReset)
-	for name, desc := range agent.DeepSeekModels {
+	p := ag.Provider()
+	fmt.Printf("\n%sModels · %s%s%s:%s\n", ANSIBold, ANSICyan, p.Name, ANSIReset, ANSIBold)
+	names := p.SortedModelNames()
+	for _, name := range names {
+		info := p.Model(name)
 		mark := " "
 		if name == ag.Model() {
 			mark = "▶"
 		}
 		cotTag := "  "
-		if agent.CoTModels[name] {
+		if info != nil && info.CoT {
 			cotTag = "🧠"
 		}
-		fmt.Printf(" %s %s %-28s %s\n", mark, cotTag, name, desc)
+		desc := ""
+		if info != nil {
+			desc = info.Description
+		}
+		fmt.Printf(" %s %s %-24s %s\n", mark, cotTag, name, desc)
 	}
-	fmt.Printf("\n%s🧠 = 支持线上 CoT 思考链%s\n", ANSICyan, ANSIReset)
+	fmt.Printf("\n%s🧠 = 原生 CoT 思考链 · %s/provider <id>%s 切换 provider%s\n", ANSICyan, ANSIYellow, ANSICyan, ANSIReset)
+}
+
+// printProviders lists all providers with the active one marked.
+func printProviders() {
+	fmt.Printf("\n%sProviders:%s\n", ANSIBold, ANSIReset)
+	for i := range agent.Providers {
+		p := &agent.Providers[i]
+		mark := " "
+		if p.ID == ag.ProviderID() {
+			mark = "▶"
+		}
+		key := ""
+		if p.EnvKey != "" {
+			key = " · " + p.EnvKey
+		}
+		models := p.SortedModelNames()
+		defaultMark := ""
+		if len(models) > 0 {
+			defaultMark = " · default " + p.DefaultModel
+		}
+		fmt.Printf(" %s %-14s %s%s%s\n", mark, p.ID, p.Name, key, defaultMark)
+	}
+	fmt.Printf("\n%sUse %s/provider <id>%s to switch, %s/model <name>%s for models.%s\n", ANSICyan, ANSIYellow, ANSICyan, ANSIYellow, ANSICyan, ANSIReset)
 }
 
 func shorten(s string, n int) string {
