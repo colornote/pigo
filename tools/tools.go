@@ -762,7 +762,10 @@ func (t *LsTool) Execute(input map[string]interface{}) *Result {
 type VisionTool struct {
 	// Runner executes the vision request and returns the model's text
 	// answer. Set by agent.New; nil → "vision model not configured".
-	Runner func(path, prompt string) (string, error)
+	Runner func(ctx context.Context, path, prompt string) (string, error)
+	// Ctx is the agent's run context (set per-tool-call by the agent loop)
+	// so ESC/Ctrl+C cancels a slow vision request, like bash.
+	Ctx context.Context
 }
 
 func (t *VisionTool) Name() string { return "vision" }
@@ -792,7 +795,11 @@ func (t *VisionTool) Execute(input map[string]interface{}) *Result {
 	if t.Runner == nil {
 		return &Result{Error: "vision model not configured — set OPENCODE_API_KEY (see /login opencode-go, /reload)"}
 	}
-	out, err := t.Runner(path, prompt)
+	ctx := t.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	out, err := t.Runner(ctx, path, prompt)
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}
 	}

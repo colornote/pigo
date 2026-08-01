@@ -812,6 +812,13 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 				}
 			}
 
+			// Same for the vision sub-agent call — ESC/Ctrl+C cancels it.
+			if tu.Name == "vision" {
+				if vt, ok := tool.(*tools.VisionTool); ok {
+					vt.Ctx = ctx
+				}
+			}
+
 			result := tool.Execute(tu.Input)
 			resultJSON := result.Output
 
@@ -1475,9 +1482,10 @@ func (a *Agent) isMultimodalMain() bool {
 
 // runVision is the injected runner for the vision tool. It reads the image
 // file, sends it to the configured multimodal model (default mimo-v2.5 on
-// opencode-go) with an optional prompt, and returns the model's text answer
+// opencode-go) with an optional prompt, streams the vision sub-agent's
+// reasoning + answer to stderr in real time, and returns the text answer
 // for the main agent to continue from.
-func (a *Agent) runVision(path, prompt string) (string, error) {
+func (a *Agent) runVision(ctx context.Context, path, prompt string) (string, error) {
 	// Read + validate the image.
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1536,15 +1544,49 @@ func (a *Agent) runVision(path, prompt string) (string, error) {
 		MaxTokens: 2048,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// Inherit the agent's run context so ESC/Ctrl+C cancels a slow vision
+	// call (like bash); a 120s wall clock bounds it otherwise.
+	callCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	client := llm.NewDeepSeekClient(key, base)
+	// Stream the vision sub-agent's output to stderr live: reasoning first,
+	// then the answer — the user sees exactly what the vision model produces.
+	sep := strings.Repeat("─", 40)
+	fmt.Fprintf(os.Stderr, "%s👁 视觉子agent%s%s · %s%s · %s\n",
+		ANSICyan, ANSIReset, ANSIGray, filepath.Base(path), ANSIReset, model)
+	fmt.Fprintf(os.Stderr, "%s%s%s\n", ANSIGray, sep, ANSIReset)
+
+	thinking := false
+	contentStarted := false
 	var content, reasoning strings.Builder
-	if _, err := client.SendStreamWithContext(ctx, req,
-		func(r string) { reasoning.WriteString(r) },
-		func(c string) { content.WriteString(c) },
-	); err != nil {
+	client := llm.NewDeepSeekClient(key, base)
+	_, err = client.SendStreamWithContext(callCtx, req,
+		func(r string) {
+			reasoning.WriteString(r)
+			if !thinking {
+				thinking = true
+				fmt.Fprintf(os.Stderr, "%s💭 视觉推理%s\n", ANSIYellow, ANSIReset)
+				fmt.Fprint(os.Stderr, ANSIThinking)
+			}
+			fmt.Fprint(os.Stderr, r)
+		},
+		func(c string) {
+			content.WriteString(c)
+			if !contentStarted {
+				contentStarted = true
+				if thinking {
+					fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
+				}
+				fmt.Fprintf(os.Stderr, "%s💡 视觉回答%s\n", ANSIGreen, ANSIReset)
+			}
+			fmt.Fprint(os.Stderr, c)
+		},
+	)
+	if thinking && !contentStarted {
+		fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
+	}
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
 		return "", fmt.Errorf("vision API: %w", err)
 	}
 

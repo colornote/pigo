@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -35,7 +36,7 @@ func TestVisionToolNotConfigured(t *testing.T) {
 func TestVisionToolRunnerInvoked(t *testing.T) {
 	var gotPath, gotPrompt string
 	v := &VisionTool{
-		Runner: func(path, prompt string) (string, error) {
+		Runner: func(ctx context.Context, path, prompt string) (string, error) {
 			gotPath, gotPrompt = path, prompt
 			return "A login form with username and password fields.", nil
 		},
@@ -58,7 +59,7 @@ func TestVisionToolRunnerInvoked(t *testing.T) {
 // TestVisionToolRunnerError verifies runner errors propagate.
 func TestVisionToolRunnerError(t *testing.T) {
 	v := &VisionTool{
-		Runner: func(path, prompt string) (string, error) {
+		Runner: func(ctx context.Context, path, prompt string) (string, error) {
 			return "", errors.New("vision API: boom")
 		},
 	}

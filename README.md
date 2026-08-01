@@ -153,6 +153,9 @@ pigo "What does docs/architecture.png show? Can you spot any issues?"
 ```
 
 The main agent uses `vision <path> [question]`; no provider switch needed.
+When the vision tool runs, you'll see the sub-agent's output streamed live
+on stderr — its reasoning (💭 视觉推理) and answer (💡 视觉回答) — while the
+same text is fed back to the main agent as the tool result.
 
 **2. Direct multimodal model.** `mimo-v2.5` / `mimo-v2.5-pro` as the *main*
 model see images via the `read` tool:
