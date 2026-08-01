@@ -9,4 +9,7 @@ const (
 	ANSICyan   = "\033[36m"
 	ANSIGray   = "\033[90m"
 	ANSIBold   = "\033[1m"
+	// ANSIThinking — soft warm gray for chain-of-thought / reasoning text,
+	// visually distinct from the default-color answer while staying muted.
+	ANSIThinking = "\033[38;5;244m"
 )

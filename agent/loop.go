@@ -608,6 +608,7 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 				fmt.Fprintf(os.Stderr, "%s💭 思考中 · Thinking%s\n%s%s\n",
 					ANSICyan, ANSIReset,
 					ANSIGray, strings.Repeat("─", 50))
+				fmt.Fprint(os.Stderr, ANSIThinking)
 			}
 			fmt.Fprint(os.Stderr, thinking)
 		}
@@ -850,7 +851,7 @@ func (a *Agent) runCoT(ctx context.Context, prompt string) (string, error) {
 		func(reasoning string) {
 			if !reasoningStarted {
 				reasoningStarted = true
-				fmt.Fprint(os.Stderr, ANSIGray)
+				fmt.Fprint(os.Stderr, ANSIThinking)
 			}
 			fmt.Fprint(os.Stderr, reasoning)
 		},
