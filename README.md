@@ -92,7 +92,13 @@ pigo -c "continue from where we left off"
 
 ## Configuration
 
-Config is loaded from `~/.pigo/.env` (global) and `./.env` (project, overrides). Project-level context files `AGENTS.md` / `CLAUDE.md` are injected into the system prompt.
+Config is loaded from `~/.pigo/.env` (global) and `./.env` (project, overrides). Context files `AGENTS.md` / `CLAUDE.md` are injected into the system prompt.
+
+On first run, PiGo creates `~/.pigo/AGENTS.md` with a starter template
+(documenting all tools including `vision`); it loads automatically on every
+startup and you can edit it freely — PiGo never overwrites it. Project-level
+`AGENTS.md` / `CLAUDE.md` are appended on top. Disable all context loading
+with `--no-context-files`/`-nc`.
 
 | Variable | Default | Description |
 |---|---|---|

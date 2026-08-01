@@ -3,8 +3,71 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// TestEnsureGlobalContextCreatesStarter verifies first run creates
+// ~/.pigo/AGENTS.md with the vision tool documented, and later runs never
+// overwrite user customizations.
+func TestEnsureGlobalContextCreatesStarter(t *testing.T) {
+	home := t.TempDir()
+	os.Setenv("HOME", home)
+	defer os.Unsetenv("HOME")
+
+	path := ensureGlobalContext()
+	if path == "" {
+		t.Fatal("expected a starter AGENTS.md path")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read starter: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "vision") {
+		t.Errorf("starter AGENTS.md should document the vision tool:\n%s", s)
+	}
+	if !strings.Contains(s, "PiGo Agent Instructions") {
+		t.Errorf("starter AGENTS.md should carry a title:\n%s", s)
+	}
+
+	// Second call must not clobber user edits.
+	custom := "MY CUSTOM RULES\n"
+	if err := os.WriteFile(path, []byte(custom), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ensureGlobalContext()
+	data, _ = os.ReadFile(path)
+	if string(data) != custom {
+		t.Errorf("ensureGlobalContext overwrote user content: %q", data)
+	}
+}
+
+// TestEnsureGlobalContextPreservesExisting verifies an existing AGENTS.md is
+// left alone entirely (no re-write, no touch).
+func TestEnsureGlobalContextPreservesExisting(t *testing.T) {
+	home := t.TempDir()
+	os.Setenv("HOME", home)
+	defer os.Unsetenv("HOME")
+
+	dir := filepath.Join(home, ".pigo")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	existing := filepath.Join(dir, "AGENTS.md")
+	if err := os.WriteFile(existing, []byte("KEEP ME"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	path := ensureGlobalContext()
+	if path != existing {
+		t.Errorf("expected %q, got %q", existing, path)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "KEEP ME" {
+		t.Errorf("existing file modified: %q", data)
+	}
+}
 
 // TestLoadSystemPromptNoContextFiles verifies that -nc/--no-context-files
 // forces the minimal default prompt without reading AGENTS.md/CLAUDE.md.
