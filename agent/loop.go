@@ -985,26 +985,29 @@ func (a *Agent) Compact(ctx context.Context, customInstr string) error {
 
 	instr := customInstr
 	if instr == "" {
-		instr = "Preserve key decisions, file paths, commands, and unresolved issues."
+		instr = "Focus on durable knowledge a future session can act on."
 	}
 
 	req := &llm.Request{
 		Model:     a.cfg.Model,
 		MaxTokens: 2048,
-		System:    "You are a meticulous conversation summarizer for a coding agent.",
+		System:    "You are a meticulous conversation summarizer for a coding agent. Output structured, itemized bullets only — never prose paragraphs.",
 		Messages: []llm.Message{
 			{
 				Role: "user",
 				Content: []llm.TextContent{{
 					Type: "text",
 					Text: fmt.Sprintf(
-						"Summarize the following coding-agent conversation.\n\n%s\n\n"+
-							"Write a concise summary that preserves:\n"+
-							"- The overall task and goal\n"+
-							"- Files read, created, and modified\n"+
-							"- Commands run and their outcomes\n"+
-							"- Key decisions and rationale\n"+
-							"- Current state and what remains to be done\n\n"+
+						"Summarize the following coding-agent conversation as an itemized logbook.\n\n%s\n\n"+
+							"Output ONLY bullet entries, grouped under exactly these headers:\n"+
+							"## Decisions\n- ...\n"+
+							"## Artifacts\n- path/to/file — what changed\n"+
+							"## Commands\n- command — outcome\n"+
+							"## Open Issues\n- ...\n\n"+
+							"Rules:\n"+
+							"- Every bullet is self-contained: a future session must understand it without the original transcript.\n"+
+							"- No paragraphs, no full rewrite of history, no preamble.\n"+
+							"- If a section has nothing, write \"- none\".\n\n"+
 							"%s\n\nSummary:",
 						transcript, instr),
 				}},
@@ -1027,6 +1030,10 @@ func (a *Agent) Compact(ctx context.Context, customInstr string) error {
 	if summary == "" {
 		return fmt.Errorf("summarize: empty summary returned")
 	}
+
+	// Persist the itemized summary as durable cross-session memory
+	// (ACE-style logbook: structured bullets, not a rewritten prompt blob).
+	saveMemory(summary)
 
 	// Rebuild the message list: summary message + retained tail.
 	newMessages := []llm.Message{
@@ -1290,7 +1297,14 @@ func extractTextContent(content interface{}) string {
 // active — the exact list of tools the model may call. Without the list the
 // model would keep trying tools that --exclude-tools/--no-tools removed.
 func (a *Agent) buildSysPrompt() string {
-	sysPrompt := BuildSystemPromptWithDir(a.mode, a.cfg.SystemPrompt, a.cfg.WorkDir)
+	// Persistent memory (ACE-style structured logbook) is injected into the
+	// normal-mode context only — self-iterate / auto-repair modes stay
+	// focused on their task and are not steered by past session entries.
+	contextInfo := a.cfg.SystemPrompt
+	if mem := loadMemory(); mem != "" {
+		contextInfo += "\n\n## Persistent Memory\n" + mem
+	}
+	sysPrompt := BuildSystemPromptWithDir(a.mode, contextInfo, a.cfg.WorkDir)
 	if a.gitContext != "" {
 		sysPrompt += "\n\n" + a.gitContext
 	}
@@ -1767,7 +1781,51 @@ If it fails, fix errors. Summarize changes.`, strings.Join(srcFiles, "\n"))
 func (a *Agent) AutoRepair(ctx context.Context, bugDesc string) error {
 	a.SetMode(ModeAutoRepair)
 	fmt.Println("🔧 Auto-Repair Mode — fixing:", bugDesc)
-	return a.RunCommand(ctx, "Bug report: "+bugDesc+"\n\nFix it and rebuild.")
+
+	prompt := "Bug report: " + bugDesc + "\n\n" +
+		"Apply a minimal fix. After you finish, the repository will be " +
+		"verified automatically (go build + go vet); if it fails you will " +
+		"receive the errors and must fix the root cause."
+
+	const maxRepairRounds = 3
+	for round := 1; round <= maxRepairRounds; round++ {
+		if err := a.RunCommand(ctx, prompt); err != nil {
+			return err
+		}
+		ok, out := a.verifyRepo()
+		if ok {
+			fmt.Println("✅ Verification passed — fix accepted.")
+			return nil
+		}
+		if round == maxRepairRounds {
+			return fmt.Errorf("auto-repair: fix still fails verification after %d rounds:\n%s",
+				maxRepairRounds, truncateForSummary(out, 1000))
+		}
+		fmt.Printf("⚠️  Verification failed (round %d/%d) — feeding errors back.\n", round, maxRepairRounds)
+		prompt = "Your previous fix does not pass verification. Errors:\n" +
+			truncateForSummary(out, 4000) + "\n\n" +
+			"Analyze the ROOT CAUSE and fix it. Do not repeat the same approach."
+	}
+	return nil
+}
+
+// verifyRepo builds and vets the project — the verifier-grounded gate for
+// AutoRepair. ok=true only when both pass clean.
+func (a *Agent) verifyRepo() (ok bool, output string) {
+	var sb strings.Builder
+	build := exec.Command("go", "build", "-o", "pigo", ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		sb.WriteString("$ go build -o pigo .\n")
+		sb.Write(out)
+		return false, sb.String()
+	}
+	vet := exec.Command("go", "vet", "./...")
+	if out, err := vet.CombinedOutput(); err != nil {
+		sb.WriteString("$ go vet ./...\n")
+		sb.Write(out)
+		return false, sb.String()
+	}
+	return true, ""
 }
 
 func (a *Agent) Rebuild() error {
@@ -1898,6 +1956,50 @@ func (a *Agent) refreshGitContext() {
 	}
 
 	a.gitContext = strings.Join(parts, "\n\n")
+}
+
+// ─── Persistent Memory (ACE-style structured logbook) ──────────
+//
+// Compact() writes itemized, self-contained bullets (Decisions / Artifacts /
+// Commands / Open Issues) to ~/.pigo/memory.md. buildSysPrompt injects the
+// file into the normal-mode system prompt, so durable knowledge survives
+// across sessions — Pattern 2 ("file system as persistent memory") applied to
+// context engineering.
+
+// memoryFilePath returns the path of the cross-session memory file.
+func memoryFilePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".pigo", "memory.md")
+}
+
+// loadMemory reads the persistent memory file. Empty string when absent.
+func loadMemory() string {
+	data, err := os.ReadFile(memoryFilePath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// saveMemory prepends a timestamped entry (newest first) to the persistent
+// memory file, keeping the file bounded to ~380 lines (~30-40 entries) so the
+// injected context stays small.
+func saveMemory(entry string) {
+	path := memoryFilePath()
+	os.MkdirAll(filepath.Dir(path), 0755)
+
+	stamp := time.Now().Format("2006-01-02 15:04")
+	block := "### " + stamp + "\n" + strings.TrimSpace(entry)
+
+	lines := []string{block}
+	if data, err := os.ReadFile(path); err == nil {
+		existing := strings.Split(strings.TrimSpace(string(data)), "\n")
+		if len(existing) > 380 {
+			existing = existing[len(existing)-380:]
+		}
+		lines = append(existing, lines...)
+	}
+	os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644)
 }
 
 func loadContextFiles(home string) string {
