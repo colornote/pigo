@@ -75,3 +75,39 @@ func TestPreviewEdit(t *testing.T) {
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
 }
+
+// TestBashToolEnv verifies session metadata (PI_SESSION_ID etc.) set via
+// Env is visible to the executed command.
+func TestBashToolEnv(t *testing.T) {
+	b := &BashTool{
+		Env: map[string]string{
+			"PI_SESSION_ID":   "abc123",
+			"PI_MODEL":        "deepseek-v4-flash",
+			"PI_SESSION_FILE": "/tmp/session.jsonl",
+		},
+	}
+	res := b.Execute(map[string]interface{}{
+		"command": `echo "id=$PI_SESSION_ID model=$PI_MODEL file=$PI_SESSION_FILE"`,
+		"timeout": 10,
+	})
+	if !res.Success {
+		t.Fatalf("bash failed: %s", res.Error)
+	}
+	want := "id=abc123 model=deepseek-v4-flash file=/tmp/session.jsonl"
+	if strings.TrimSpace(res.Output) != want {
+		t.Errorf("env not propagated: got %q, want %q", res.Output, want)
+	}
+}
+
+// TestEnvToSlice verifies the map→"KEY=VALUE" conversion used for cmd.Env.
+func TestEnvToSlice(t *testing.T) {
+	got := envToSlice(map[string]string{"A": "1", "B": "x y"})
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %v", got)
+	}
+	for _, kv := range got {
+		if kv != "A=1" && kv != "B=x y" {
+			t.Errorf("unexpected entry: %q", kv)
+		}
+	}
+}

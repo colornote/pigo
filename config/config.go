@@ -28,6 +28,13 @@ type Config struct {
 	// VisionModel is the vision sub-agent model used by the `vision` tool
 	// (default: mimo-v2.5 on opencode-go). Auth comes from OPENCODE_API_KEY.
 	VisionModel string
+	// Tools / ExcludeTools / NoTools — tool filtering flags (pi parity):
+	// --tools read,write   only these tools are available
+	// --exclude-tools bash disable specific tools
+	// --no-tools           disable all tools (text-only)
+	Tools        []string
+	ExcludeTools []string
+	NoTools      bool
 }
 
 // starterAGENTS is written to ~/.pigo/AGENTS.md on first run (when the file

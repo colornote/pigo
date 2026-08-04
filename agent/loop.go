@@ -36,6 +36,10 @@ type Agent struct {
 	autoRepair     bool     // auto-trigger repair on error
 	gitContext     string   // cached git project context
 	messageIDs     []string // parallel IDs for messages ↔ session entries
+	// Tool filtering (--tools / --exclude-tools / --no-tools).
+	noTools     bool            // all tools disabled
+	toolInclude map[string]bool // --tools allowlist (nil = all)
+	toolExclude map[string]bool // --exclude-tools denylist
 }
 
 func New(cfg *config.Config) *Agent {
@@ -104,6 +108,7 @@ func New(cfg *config.Config) *Agent {
 		messageIDs:     []string{},
 	}
 	a.SetThinking(ThinkingLevel(cfg.ThinkingLevel))
+	a.applyToolFilter(cfg.Tools, cfg.ExcludeTools, cfg.NoTools)
 	// Wire the vision sub-agent tool to the live runner (reads env on call).
 	reg.Register(&tools.VisionTool{Runner: a.runVision})
 	a.refreshGitContext()
@@ -590,10 +595,7 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		default:
 		}
 
-		sysPrompt := BuildSystemPromptWithDir(a.mode, a.cfg.SystemPrompt, a.cfg.WorkDir)
-		if a.gitContext != "" {
-			sysPrompt += "\n\n" + a.gitContext
-		}
+		sysPrompt := a.buildSysPrompt()
 		maxTok := thinkingTokens[a.thinking]
 		openAI := a.useOpenAIProtocol()
 
@@ -758,12 +760,16 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		toolResults := make([]interface{}, len(toolUses))
 		for i, tu := range toolUses {
 			tool := a.registry.Get(tu.Name)
-			if tool == nil {
+			if tool == nil || !a.toolEnabled(tu.Name) {
+				reason := "Unknown"
+				if tool != nil {
+					reason = "disabled by --exclude-tools/--no-tools"
+				}
 				toolResults[i] = map[string]interface{}{
 					"type": "tool_result", "tool_use_id": tu.ID,
-					"content": fmt.Sprintf("Unknown: %s", tu.Name),
+					"content": fmt.Sprintf("%s: %s", reason, tu.Name),
 				}
-				a.saveEntry("tool", fmt.Sprintf("Unknown tool: %s", tu.Name), tu.ID)
+				a.saveEntry("tool", fmt.Sprintf("%s tool: %s", reason, tu.Name), tu.ID)
 				continue
 			}
 			// Tool header line
@@ -805,10 +811,12 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 
 			// Let ESC/Ctrl+C cancel propagate into the bash command so an
 			// interrupt kills long-running commands immediately (not just at
-			// the next turn boundary).
+			// the next turn boundary). Session metadata (PI_* vars) is
+			// exported to the command too, like pi.
 			if tu.Name == "bash" {
 				if bt, ok := tool.(*tools.BashTool); ok {
 					bt.Ctx = ctx
+					bt.Env = a.sessionEnv()
 				}
 			}
 
@@ -1220,10 +1228,7 @@ func truncateForSummary(s string, maxLen int) string {
 func (a *Agent) buildDSMessages(currentPrompt string) []llm.DSMessage {
 	var out []llm.DSMessage
 
-	sysPrompt := BuildSystemPromptWithDir(a.mode, a.cfg.SystemPrompt, a.cfg.WorkDir)
-	if a.gitContext != "" {
-		sysPrompt += "\n\n" + a.gitContext
-	}
+	sysPrompt := a.buildSysPrompt()
 	if sysPrompt != "" {
 		out = append(out, llm.DSMessage{
 			Role:    "system",
@@ -1278,6 +1283,141 @@ func extractTextContent(content interface{}) string {
 	return fmt.Sprintf("%v", content)
 }
 
+// ─── System prompt assembly ──────────────────────────────────
+
+// buildSysPrompt assembles the full system prompt for a turn: the built-in
+// prompt (mode + context files), git context, and — when a tool filter is
+// active — the exact list of tools the model may call. Without the list the
+// model would keep trying tools that --exclude-tools/--no-tools removed.
+func (a *Agent) buildSysPrompt() string {
+	sysPrompt := BuildSystemPromptWithDir(a.mode, a.cfg.SystemPrompt, a.cfg.WorkDir)
+	if a.gitContext != "" {
+		sysPrompt += "\n\n" + a.gitContext
+	}
+	if a.toolFilterActive() {
+		names := a.enabledToolNames()
+		if len(names) == 0 {
+			sysPrompt += "\n\nAvailable tools: none — answer directly without tools."
+		} else {
+			sysPrompt += "\n\nAvailable tools: " + strings.Join(names, ", ")
+		}
+	}
+	return sysPrompt
+}
+
+// ─── Tool filtering (--tools / --exclude-tools / --no-tools) ─
+
+// applyToolFilter stores the tool allowlist/denylist from the config.
+// Empty include = all tools allowed; exclude removes named tools; none
+// disables everything. Applied at construction and again on /reload.
+func (a *Agent) applyToolFilter(include, exclude []string, none bool) {
+	a.toolInclude = nil
+	a.toolExclude = nil
+	a.noTools = none
+	if len(include) > 0 {
+		a.toolInclude = make(map[string]bool, len(include))
+		for _, n := range include {
+			if n = strings.TrimSpace(n); n != "" {
+				a.toolInclude[n] = true
+			}
+		}
+	}
+	if len(exclude) > 0 {
+		a.toolExclude = make(map[string]bool, len(exclude))
+		for _, n := range exclude {
+			if n = strings.TrimSpace(n); n != "" {
+				a.toolExclude[n] = true
+			}
+		}
+	}
+}
+
+// toolFilterActive reports whether any tool filtering is in effect.
+func (a *Agent) toolFilterActive() bool {
+	return a.noTools || len(a.toolInclude) > 0 || len(a.toolExclude) > 0
+}
+
+// enabledTools returns the registry tools that pass the active filter, in
+// registration order.
+func (a *Agent) enabledTools() []tools.Tool {
+	if a.noTools {
+		return nil
+	}
+	var out []tools.Tool
+	for _, t := range a.registry.List() {
+		if a.toolInclude != nil && !a.toolInclude[t.Name()] {
+			continue
+		}
+		if a.toolExclude != nil && a.toolExclude[t.Name()] {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// enabledToolNames returns the names of enabled tools in registration order.
+func (a *Agent) enabledToolNames() []string {
+	ts := a.enabledTools()
+	names := make([]string, len(ts))
+	for i, t := range ts {
+		names[i] = t.Name()
+	}
+	return names
+}
+
+// toolEnabled reports whether a single tool may be executed. Used as a
+// second gate in the loop: even if the API (wrongly) returns a tool_use for
+// a disabled tool, it is reported back as unavailable instead of run.
+func (a *Agent) toolEnabled(name string) bool {
+	if a.noTools {
+		return false
+	}
+	if a.toolInclude != nil && !a.toolInclude[name] {
+		return false
+	}
+	if a.toolExclude != nil && a.toolExclude[name] {
+		return false
+	}
+	return true
+}
+
+// sessionEnv returns the session metadata exported to bash commands as
+// environment variables, mirroring pi (PI_SESSION_ID, PI_SESSION_FILE,
+// PI_PROVIDER, PI_MODEL, PI_REASONING_LEVEL). Values are resolved when each
+// command starts; PI_SESSION_FILE is omitted for ephemeral sessions.
+func (a *Agent) sessionEnv() map[string]string {
+	env := map[string]string{
+		"PI_PROVIDER":        a.ProviderID(),
+		"PI_MODEL":           a.Model(),
+		"PI_REASONING_LEVEL": string(a.Thinking()),
+	}
+	if a.session != nil {
+		env["PI_SESSION_ID"] = a.session.ID
+		env["PI_SESSION_FILE"] = a.session.FilePath
+	}
+	return env
+}
+
+// ─── New session ─────────────────────────────────────────────
+
+// NewSession starts a fresh session, discarding the current in-memory
+// history (the old session stays persisted on disk — /new only resets
+// state, it never deletes anything).
+func (a *Agent) NewSession() error {
+	if a.noSession {
+		return fmt.Errorf("ephemeral mode — sessions disabled")
+	}
+	if a.session != nil {
+		if err := a.session.Flush(); err != nil {
+			return err
+		}
+	}
+	a.messages = nil
+	a.messageIDs = nil
+	return a.InitSession("")
+}
+
 func (a *Agent) buildToolDefs() []llm.Tool {
 	format := ""
 	if a.provider != nil {
@@ -1291,7 +1431,7 @@ func (a *Agent) buildToolDefs() []llm.Tool {
 	}
 	openAI := format == "openai"
 	var defs []llm.Tool
-	for _, t := range a.registry.List() {
+	for _, t := range a.enabledTools() {
 		def := llm.Tool{Name: t.Name(), Description: t.Description()}
 		if openAI {
 			def.Parameters = t.Schema()
@@ -1318,7 +1458,7 @@ func (a *Agent) useOpenAIProtocol() bool {
 // buildOpenAIToolDefs builds OpenAI-style function tools from the registry.
 func (a *Agent) buildOpenAIToolDefs() []llm.DSTool {
 	var defs []llm.DSTool
-	for _, t := range a.registry.List() {
+	for _, t := range a.enabledTools() {
 		defs = append(defs, llm.DSTool{
 			Type: "function",
 			Function: llm.DSToolFunction{
@@ -1672,6 +1812,7 @@ func (a *Agent) Reload() (string, error) {
 	a.registry.Register(&tools.FindTool{})
 	// Re-wire the vision sub-agent tool (runner reads live env vars).
 	a.registry.Register(&tools.VisionTool{Runner: a.runVision})
+	a.applyToolFilter(a.cfg.Tools, a.cfg.ExcludeTools, a.cfg.NoTools)
 	reloaded = append(reloaded, "tools")
 
 	// 3. Re-read config (API key might have changed in .env)

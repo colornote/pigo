@@ -192,13 +192,21 @@ Usage: pigo [options] [@files...] [prompt]
   --help, -h        Show help
   --version, -v     Show version
   --model <name>    Set model for single-shot
+  --provider <id>   Set provider (deepseek, opencode-go)
   --thinking <lvl>  Set thinking level
   --print, -p       Non-interactive: print response and exit
   --continue, -c    Continue most recent session
   --resume, -r      Browse and select from past sessions
-  --session <id>    Load specific session by ID prefix
+  --session <id>    Load specific session by ID prefix or .jsonl path
+  --session-dir <d> Custom session storage directory
   --name <name>     Set session display name
   --no-session      Ephemeral mode (don't save)
+  --no-context-files Disable AGENTS.md/CLAUDE.md loading (-nc)
+  --api-key <key>   Override API key (overrides env vars)
+  --list-models     List available models and exit
+  --tools <list>    Only enable these tools: read,write,edit,bash,grep,find,ls,vision (-t)
+  --exclude-tools <list> Disable specific tools (-xt)
+  --no-tools        Disable all tools (text-only) (-nt)
 ```
 
 ### Interactive commands
@@ -216,6 +224,7 @@ Usage: pigo [options] [@files...] [prompt]
 | `/reload` | Reload context files, tools, config |
 | `/compact [instr]` | Summarize old messages to free context |
 | `/session` | Show current session info |
+| `/new` | Start a new session |
 | `/save [name]` | Save / name current session |
 | `/load <id>` | Load a session by ID prefix |
 | `/resume` | Browse and pick a session to resume |
@@ -229,7 +238,11 @@ Usage: pigo [options] [@files...] [prompt]
 | `\` at end of line | Continue on the next line (line-numbered) |
 | `\e` at end of line | Open the external editor with current content |
 | ` ``` ` on its own line | Start a code block (` ``` ` again to end) |
+| `!cmd` | Run the command and send its output to the LLM |
+| `!!cmd` | Run the command and show the output only |
 | `ESC` / `Ctrl+C` during a run | Interrupt the model, then append a follow-up prompt |
+
+Bash commands run by the agent also receive session metadata as environment variables (pi parity): `PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`, `PI_REASONING_LEVEL`.
 
 ---
 
