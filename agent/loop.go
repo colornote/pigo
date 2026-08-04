@@ -2025,6 +2025,11 @@ func loadContextFiles(home string) string {
 		parts = append(parts, "Check `docs/` for pi design reference & feature specs.")
 	}
 
+	// Available capability packages (project packages/ + ~/.pigo/packages).
+	if info := config.PackagesInfo(); info != "" {
+		parts = append(parts, strings.TrimPrefix(info, "\n\n"))
+	}
+
 	if len(parts) == 0 {
 		return "You are PiGo — a coding agent in Go.\nTools: read, write, edit, bash, grep, find, ls, vision.\nBe concise. Use edit for changes. Use the `vision` tool to analyze image files.\n\n## Docs\nCheck `docs/` for pi design reference & feature specs.\n"
 	}
