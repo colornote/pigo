@@ -102,6 +102,11 @@ pigo/
     - 可选：`/repair` 时把失败归因到组件并记录（轻量版 AHE manifesto）
 
 ## Notes
+- **`packages/browser/`** — standalone pi-style package (independent of PiGo
+  core): zero-dependency Go CDP Chrome automation CLI (`open/tabs/eval/click/
+  type/text/scroll/shot/close/lock`). Follows the topromax-ops Chrome baseline
+  (`:9222`, `~/.chrome-cdp-profile`, `--remote-allow-origins=*`,
+  `/tmp/topromax-cdp.lock`). See `packages/browser/README.md` + `SKILL.md`.
 - Inline CoT tag parsing (`llm/deepseek.go`): fixed a bug where an empty opening-tag
   string caused all content deltas to be routed to the thinking display (answers were
   swallowed). Parser now accepts Chinese (` 回复`/` /回复`, ` 思考`/` /思考`) and HTML

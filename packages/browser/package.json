@@ -1,0 +1,11 @@
+{
+  "name": "browser",
+  "version": "0.1.0",
+  "description": "Chrome-browser-like CDP automation package for coding agents: open tabs, navigate, click, type, read page text, scroll, screenshot — zero-dependency Go CLI attached to a persistent Chrome profile on :9222.",
+  "keywords": ["pi-package", "browser", "cdp", "chrome", "automation"],
+  "pi": {
+    "skills": ["./SKILL.md"],
+    "scripts": ["./bin/browser"],
+    "extensions": []
+  }
+}
