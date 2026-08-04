@@ -2,6 +2,8 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,10 +223,120 @@ func loadSystemPrompt(home string) string {
 	}
 	for _, p := range places {
 		if data, err := os.ReadFile(p); err == nil {
-			return string(data)
+			return string(data) + PackagesInfo()
 		}
 	}
-	return "You are PiGo. Use read/write/edit/bash."
+	return "You are PiGo. Use read/write/edit/bash." + PackagesInfo()
+}
+
+// ─── Package / Extension discovery ─────────────────────────────
+//
+// PiGo auto-discovers pi-style capability packages under `packages/`
+// (project) and `~/.pigo/packages/` (global) and injects a short listing
+// into the system prompt, so the agent knows which extensions exist. The
+// full instructions live in each package's SKILL.md — progressive disclosure.
+
+// packagesRoots lists where capability packages are discovered: project
+// `packages/` and global `~/.pigo/packages/`. Package-level so tests can
+// point it at a temp dir.
+var packagesRoots = func() []string {
+	roots := []string{"packages"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		roots = append(roots, filepath.Join(home, ".pigo", "packages"))
+	}
+	return roots
+}()
+
+// PackagesInfo returns the markdown listing of available packages, or "" when
+// none are found. Exported so agent/Reload can re-derive it identically.
+func PackagesInfo() string {
+	var lines []string
+	seen := map[string]bool{}
+	for _, root := range packagesRoots {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			dir := filepath.Join(root, e.Name())
+			name, desc := packageMeta(dir)
+			if name == "" {
+				name = e.Name()
+			}
+			if desc == "" {
+				continue // unknown capability — don't advertise it
+			}
+			key := filepath.Clean(dir)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			lines = append(lines, fmt.Sprintf("- **%s** — %s (see `%s/SKILL.md` for usage)", name, desc, dir))
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "\n\n## Packages\nAvailable capability packages (progressive disclosure: read a package's `SKILL.md` for full instructions before using it):\n" + strings.Join(lines, "\n")
+}
+
+// packageMeta extracts (name, description) from a package dir: the
+// `package.json` pi manifest first, falling back to the SKILL.md frontmatter.
+func packageMeta(dir string) (name, desc string) {
+	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+		var m struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Pi          struct {
+				Description string `json:"description"`
+			} `json:"pi"`
+		}
+		if json.Unmarshal(data, &m) == nil {
+			name = m.Name
+			desc = m.Pi.Description
+			if desc == "" {
+				desc = m.Description
+			}
+		}
+	}
+	if desc == "" {
+		if data, err := os.ReadFile(filepath.Join(dir, "SKILL.md")); err == nil {
+			if n, d := skillFrontmatter(data); d != "" {
+				if name == "" {
+					name = n
+				}
+				desc = d
+			}
+		}
+	}
+	return
+}
+
+// skillFrontmatter parses the `--- name: … description: … ---` header of a
+// SKILL.md (Agent Skills spec) and returns (name, description).
+func skillFrontmatter(data []byte) (name, desc string) {
+	s := string(data)
+	if !strings.HasPrefix(s, "---") {
+		return "", ""
+	}
+	rest := s[3:]
+	end := strings.Index(rest, "---")
+	if end < 0 {
+		return "", ""
+	}
+	for _, line := range strings.Split(rest[:end], "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "name:"):
+			name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+		case strings.HasPrefix(line, "description:"):
+			desc = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+		}
+	}
+	return
 }
 
 func lookupKey(providerID string) string {

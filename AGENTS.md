@@ -40,3 +40,19 @@ pigo/
 | `/repair <desc>` | 自动修复 |
 | `/help` | 帮助 |
 | `/quit` | 退出 |
+
+## Packages / 扩展
+
+pigo 启动和 `/reload` 时自动扫描 `packages/`（项目级）与 `~/.pigo/packages/`
+（全局），把可用扩展的名称 + 描述注入系统提示词的 `## Packages` 段。
+你不需要手动记忆清单——每次会话的系统提示词里就有。
+
+发现可用的 package 时：
+
+1. 先用 `read packages/<name>/SKILL.md` 读取完整用法（渐进式披露）
+2. 按 SKILL.md 的说明调用对应的 CLI / 脚本
+3. 扩展包是独立能力（不依赖 pigo 核心），不要修改其源码，除非任务明确要求
+4. 截图类输出（如 `browser shot`）配合 `vision` 工具使用
+
+当前已有：`packages/browser/` — CDP Chrome 自动化（open/tabs/eval/click/type/text/shot）。
+
