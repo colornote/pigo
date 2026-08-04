@@ -121,3 +121,15 @@ func TestVerifyProviderKeySkipsWithoutEndpoint(t *testing.T) {
 		t.Errorf("expected (true, nil), got (%v, %v)", ok, err)
 	}
 }
+
+// TestSplitCommaList verifies --tools/--exclude-tools value parsing:
+// comma-split, trimmed, empty tokens dropped.
+func TestSplitCommaList(t *testing.T) {
+	got := splitCommaList("read, write,,bash ")
+	if len(got) != 3 || got[0] != "read" || got[1] != "write" || got[2] != "bash" {
+		t.Errorf("splitCommaList: got %v", got)
+	}
+	if got := splitCommaList(""); len(got) != 0 {
+		t.Errorf("empty input should yield no tokens, got %v", got)
+	}
+}

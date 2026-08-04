@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -117,6 +118,21 @@ func main() {
 		case "--no-context-files", "-nc":
 			cfg.NoContextFiles = true
 			cfg.LoadSystemPrompt()
+		case "--tools", "-t":
+			i++
+			if i < len(args) {
+				cfg.Tools = splitCommaList(args[i])
+				recreateAgent(cfg)
+			}
+		case "--exclude-tools", "-xt":
+			i++
+			if i < len(args) {
+				cfg.ExcludeTools = splitCommaList(args[i])
+				recreateAgent(cfg)
+			}
+		case "--no-tools", "-nt":
+			cfg.NoTools = true
+			recreateAgent(cfg)
 		case "--list-models":
 			printAllModels()
 			goodbye()
@@ -301,7 +317,7 @@ func runInteractive() {
 	ag.Footer()
 
 	// Multi-line hint
-	fmt.Printf("\n%s  ESC → 打断+追加提示  │  \\ → 续行  │  \\e → 编辑器  │  ``` → 代码块  │  /multiline → 全屏编辑%s\n",
+	fmt.Printf("\n%s  ESC → 打断+追加提示  │  \\ → 续行  │  \\e → 编辑器  │  ``` → 代码块  │  !cmd → 执行并发送  │  /multiline → 全屏编辑%s\n",
 		ANSIGray, ANSIReset)
 
 	// Liner-based line editor: rune-safe backspace for CJK input
@@ -384,8 +400,25 @@ func runInteractive() {
 			continue
 		}
 
+		// ── !command / !!command: run a shell command (pi parity) ──
+		// !cmd runs the command and sends its output to the LLM;
+		// !!cmd runs it and shows the output without sending it.
+		if strings.HasPrefix(trimmed, "!") {
+			sendToLLM := true
+			cmdStr := strings.TrimPrefix(trimmed, "!")
+			if strings.HasPrefix(cmdStr, "!") {
+				cmdStr = strings.TrimPrefix(cmdStr, "!")
+				sendToLLM = false
+			}
+			output := runShellCommand(cmdStr)
+			if sendToLLM && strings.TrimSpace(output) != "" {
+				dispatch("运行命令 `"+cmdStr+"` 的输出：\n\n"+output, reader)
+			}
+			continue
+		}
+
 		// Save non-trivial input to history
-		if !strings.HasPrefix(trimmed, "/") {
+		if !strings.HasPrefix(trimmed, "/") && !strings.HasPrefix(trimmed, "!") {
 			ls.AppendHistory(trimmed)
 		}
 		dispatch(trimmed, reader)
@@ -491,6 +524,44 @@ func readBacktickBlock(ls *liner.State) string {
 	}
 }
 
+// runShellCommand executes a shell command with a 30s timeout and prints
+// its combined output with a gutter. Returns the raw output (empty string
+// when the command produced none) so `!cmd` can forward it to the LLM.
+func runShellCommand(command string) string {
+	if strings.TrimSpace(command) == "" {
+		fmt.Fprintf(os.Stderr, "%s✗ empty command%s\n", ANSIRed, ANSIReset)
+		return ""
+	}
+	fmt.Printf("%s$ %s%s\n", ANSICyan, ANSIGray, command)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}()
+
+	output, err := cmd.CombinedOutput()
+	out := strings.TrimRight(string(output), "\n")
+	if out != "" {
+		for _, line := range strings.Split(out, "\n") {
+			fmt.Printf("%s  │%s %s\n", ANSIGray, ANSIReset, line)
+		}
+	}
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr, "%s✗ timed out after 30s%s\n", ANSIRed, ANSIReset)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s✗ %v%s\n", ANSIRed, err, ANSIReset)
+		}
+	}
+	return out
+}
+
 // openEditor opens the user's preferred editor for multi-line input.
 // seed is pre-filled content (may be empty).
 func openEditor(seed string) string {
@@ -590,6 +661,9 @@ func showHelp() {
 	fmt.Printf("  --no-context-files Disable AGENTS.md/CLAUDE.md loading (-nc)\n")
 	fmt.Printf("  --api-key <key>   Override API key (overrides env vars)\n")
 	fmt.Printf("  --list-models     List available models and exit\n")
+	fmt.Printf("  --tools <list>    Only enable these tools: read,write,edit,bash,grep,find,ls,vision (-t)\n")
+	fmt.Printf("  --exclude-tools <list> Disable specific tools (-xt)\n")
+	fmt.Printf("  --no-tools        Disable all tools (text-only) (-nt)\n")
 	fmt.Printf("\n%sFile Arguments:%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("  %s@file%s             Include file contents in the prompt\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %spiped stdin%s         cat file | pigo -p \"prompt\" merges stdin\n", ANSIYellow, ANSIReset)
@@ -608,6 +682,7 @@ func showHelp() {
 	fmt.Printf("  %s/multiline%s        Open editor for multi-line input\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/compact [instr]%s   Summarize old messages to free context\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/session%s          Show current session info\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/new%s              Start a new session\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/name <name>%s      Set session display name\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/save [name]%s      Save and name current session\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/load <id>%s        Load a session by ID prefix\n", ANSIYellow, ANSIReset)
@@ -619,6 +694,8 @@ func showHelp() {
 	fmt.Printf("  %s\\e%s at end of line      Open editor with current content\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s```%s on its own line    Start code block (``` to end)\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/multiline%s            Open empty editor for input\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s!cmd%s                  Run command, send output to LLM\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s!!cmd%s                 Run command, show output only\n", ANSIYellow, ANSIReset)
 	fmt.Printf("\n%sExamples:%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("  pigo                           Interactive mode\n")
 	fmt.Printf("  pigo -c                        Continue last session\n")
@@ -648,6 +725,18 @@ func fileArgPrompt(path string) string {
 		content = content[:40000] + "\n...[truncated]"
 	}
 	return fmt.Sprintf("<file path=%q>\n%s\n</file>", path, content)
+}
+
+// splitCommaList splits a comma-separated flag value ("read,write,bash")
+// into trimmed, non-empty tokens. Used by --tools/--exclude-tools.
+func splitCommaList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ─── ESC Interrupt Support ─────────────────────────────────────
@@ -770,7 +859,11 @@ func runWithESC(input string, reader *bufio.Reader) {
 		waitListenerDone(listenerDone)
 	}
 
-	if err == context.Canceled {
+	// ESC/Ctrl+C cancel surfaces as a WRAPPED context.Canceled ("API: Get
+	// …: context canceled" from the streaming HTTP call), so a plain
+	// `err == context.Canceled` check never matches and the follow-up
+	// steering flow below was dead code. errors.Is unwraps it.
+	if errors.Is(err, context.Canceled) {
 		// ESC interrupt: restore the terminal to its ORIGINAL cooked state
 		// (captured at startup, before liner put the tty in raw mode).
 		// Restoring to oldState would go back to liner's raw mode, where
@@ -810,8 +903,13 @@ func runWithESC(input string, reader *bufio.Reader) {
 		}
 
 		if followUp != "" {
-			// Re-run with follow-up appended as steering message
-			runWithESC(input+"\n\n[用户追加]"+followUp, reader)
+			// Re-run with the follow-up as a NEW user message. The original
+			// prompt is already in the history (Run appended it before the
+			// interrupted API call), so re-sending it here would duplicate
+			// it in both the session JSONL and the model's context. Sending
+			// only the follow-up matches pi's steering-message semantics:
+			// the model sees the original ask plus the correction.
+			runWithESC(followUp, reader)
 		}
 		return
 	}
@@ -1004,6 +1102,13 @@ func dispatch(input string, reader *bufio.Reader) {
 		}
 
 	// ─── Session Commands ─────────────────────────────────────
+	case input == "/new":
+		if err := ag.NewSession(); err != nil {
+			fmt.Printf("%s✗ %v%s\n", ANSIRed, err, ANSIReset)
+		} else {
+			fmt.Printf("%s✓ New session started%s\n", ANSIGreen, ANSIReset)
+		}
+
 	case strings.HasPrefix(input, "/name "):
 		name := strings.TrimSpace(strings.TrimPrefix(input, "/name "))
 		s := ag.Session()

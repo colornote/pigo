@@ -448,8 +448,11 @@ const (
 
 // BashTool executes a bash command with a timeout.
 // Set Ctx to the agent's run context so ESC/Ctrl+C can kill long commands.
+// Env carries session metadata (PI_SESSION_ID, PI_PROVIDER, …) resolved by
+// the agent loop per call — the same variables pi exports to bash commands.
 type BashTool struct {
 	Ctx context.Context
+	Env map[string]string
 }
 
 func (t *BashTool) Name() string        { return "bash" }
@@ -483,6 +486,9 @@ func (t *BashTool) Execute(input map[string]interface{}) *Result {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	if len(t.Env) > 0 {
+		cmd.Env = append(os.Environ(), envToSlice(t.Env)...)
+	}
 	// Run the child in its own process group so a timeout can kill the
 	// entire tree (bash + grandchildren). Without this, orphaned children
 	// inherit the stdout pipe and cmd.Wait() blocks until they exit —
@@ -568,6 +574,15 @@ func (t *BashTool) Execute(input map[string]interface{}) *Result {
 		return &Result{Success: false, Output: outStr, Error: err.Error()}
 	}
 	return &Result{Success: true, Output: outStr}
+}
+
+// envToSlice converts an env map to "KEY=VALUE" strings for cmd.Env.
+func envToSlice(env map[string]string) []string {
+	out := make([]string, 0, len(env))
+	for k, v := range env {
+		out = append(out, k+"="+v)
+	}
+	return out
 }
 
 // ─── GrepTool ────────────────────────────────────────────────────
