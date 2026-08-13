@@ -7,6 +7,7 @@ pigo/
 ├── config/config.go     # Config + .env loading
 ├── llm/client.go        # Anthropic-compatible API client
 ├── llm/deepseek.go      # DeepSeek native API (CoT)
+├── llm/responses.go     # DeepSeek Responses API (/v1/responses, Codex-compatible)
 ├── llm/usage.go         # Token usage tracking
 ├── tools/tools.go       # Core tools (read/write/edit/bash ONLY)
 ├── agent/loop.go        # Core agent loop + tool execution
@@ -53,6 +54,7 @@ pigo/
 - [x] Vision sub-agent tool (`vision`) — a global tool that calls a multimodal model (default `mimo-v2.5` on opencode-go, configurable via `PIGO_VISION_MODEL` / `PIGO_VISION_BASE_URL`, auth `OPENCODE_API_KEY`) to analyze an image and return a text description to the MAIN agent. Text models (DeepSeek) never see raw base64: `read` returns a `[Image: … use the vision tool …]` hint for text main models (`ImageModeHint`) and a base64 data URL only for multimodal main models (`ImageModeDataURL`). Runner injected by `agent.New`/`Reload` (`tools.VisionTool.Runner`), tools package stays free of llm imports.
 - [x] Persistent structured memory (`~/.pigo/memory.md`, ACE-style) — `/compact` now asks the model for itemized bullets only (`## Decisions` / `## Artifacts` / `## Commands` / `## Open Issues`, every bullet self-contained), appends the result as a timestamped entry to `~/.pigo/memory.md`, and `buildSysPrompt` injects the logbook into the normal-mode system prompt. Durable knowledge survives across sessions; self-iterate/auto-repair modes stay unsteered. (Harness engineering: Pattern 2 "file system as persistent memory" + ACE context engineering.)
 - [x] Verifier-grounded auto-repair — `/repair` (and the `r`-key / auto-repair triggers) now run a fix→verify→refine loop: after the model edits, `verifyRepo()` runs `go build -o pigo .` + `go vet ./...`; on failure the errors are fed back with "analyze the ROOT CAUSE, do not repeat the same approach", up to 3 rounds. A fix is accepted only when build+vet pass. (Harness engineering: Self-Harness/AHE evidence-driven, verifier-grounded edits.)
+- [x] DeepSeek Responses API (`deepseek-responses` provider, `/v1/responses`) — Codex-compatible protocol: `instructions` → system prompt, input items (`message` / `function_call` / `function_call_output`), semantic SSE events (`response.output_text.delta` / `response.reasoning_text.delta` / `response.function_call_arguments.delta` / `response.completed`…, no `[DONE]`), terminal-event usage (`input_tokens_details.cached_tokens` → cache-hit accounting). Per https://api-docs.deepseek.com/zh-cn/guides/responses_api — `llm/responses.go` + `agent/responses_test.go`.
 
 ## Tools Policy
 - **8 tools: read, write, edit, bash, grep, find, ls, vision**
