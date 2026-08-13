@@ -84,6 +84,7 @@ func sortStrings(s []string) {
 var Providers = []Provider{
 	DeepSeekProvider,
 	OpenCodeGoProvider,
+	DeepSeekResponsesProvider,
 }
 
 // DeepSeekProvider is the original provider: DeepSeek's Anthropic-compatible
@@ -116,6 +117,36 @@ var DeepSeekProvider = Provider{
 			ID: "deepseek-reasoner", Name: "Reasoner", Description: "深度推理",
 			Reasoning: true, CoT: true, ContextWindow: 128_000, MaxTokens: 64_000,
 			Pricing: llm.ModelPricing{InputPrice: 0.55, OutputPrice: 2.19, CacheHit: 0.14},
+		},
+	},
+}
+
+// DeepSeekResponsesProvider serves the DeepSeek family through the
+// OpenAI-compatible Responses API (POST {DSBaseURL}/v1/responses) — the
+// protocol used by Codex and described at
+// https://api-docs.deepseek.com/zh-cn/guides/responses_api. Streaming
+// returns semantic SSE events (response.output_text.delta etc.) ending with
+// response.completed / response.incomplete / response.failed — no [DONE].
+// Model ids here are the plain Responses-API names (deepseek-v4-pro without
+// the [1m] suffix used by the anthropic endpoint).
+var DeepSeekResponsesProvider = Provider{
+	ID:           "deepseek-responses",
+	Name:         "DeepSeek Responses",
+	EnvKey:       "DEEPSEEK_API_KEY",
+	BaseURL:      "https://api.deepseek.com/anthropic",
+	DSBaseURL:    "https://api.deepseek.com",
+	DefaultModel: "deepseek-v4-flash",
+	ToolsFormat:  "responses", // /v1/responses semantic SSE events
+	Models: map[string]llm.ModelInfo{
+		"deepseek-v4-flash": {
+			ID: "deepseek-v4-flash", Name: "V4 Flash", Description: "快速 · Responses API",
+			Reasoning: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
+			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.014},
+		},
+		"deepseek-v4-pro": {
+			ID: "deepseek-v4-pro", Name: "V4 Pro", Description: "更强 · Responses API",
+			Reasoning: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
+			Pricing: llm.ModelPricing{InputPrice: 0.28, OutputPrice: 0.56, CacheHit: 0.028},
 		},
 	},
 }

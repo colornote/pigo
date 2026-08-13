@@ -649,7 +649,7 @@ func showHelp() {
 	fmt.Printf("  --help, -h        Show this help\n")
 	fmt.Printf("  --version, -v     Show version\n")
 	fmt.Printf("  --model <name>    Set model for single-shot\n")
-	fmt.Printf("  --provider <id>   Set provider (deepseek, opencode-go)\n")
+	fmt.Printf("  --provider <id>   Set provider (deepseek, opencode-go, deepseek-responses)\n")
 	fmt.Printf("  --thinking <lvl>  Set thinking level\n")
 	fmt.Printf("  --print, -p       Non-interactive: print response and exit\n")
 	fmt.Printf("  --continue, -c    Continue most recent session\n")
@@ -1384,7 +1384,12 @@ func workDir() string {
 // promptStatus returns a compact model·thinking indicator for the prompt line.
 func promptStatus() string {
 	p := ""
-	if ag.ProviderID() != "deepseek" {
+	switch ag.ProviderID() {
+	case "deepseek-responses":
+		p = "rs·"
+	case "deepseek":
+		// no prefix
+	default:
 		p = "oc·" // opencode-go
 	}
 	return p + agent.ShortModelName(ag.Model()) + "·" + shortThinking(string(ag.Thinking()))

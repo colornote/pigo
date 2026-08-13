@@ -597,7 +597,7 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 
 		sysPrompt := a.buildSysPrompt()
 		maxTok := thinkingTokens[a.thinking]
-		openAI := a.useOpenAIProtocol()
+		protocol := a.protocol()
 
 		// Track streaming state
 		var (
@@ -658,7 +658,39 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 
 		var resp *llm.Response
 		var apiErr error
-		if openAI {
+		switch protocol {
+		case "responses":
+			// DeepSeek Responses API (/v1/responses, Codex-compatible):
+			// instructions → system prompt, input items carry the history,
+			// tools use {"type":"function",...}, model answers with
+			// function_call items. Reasoning arrives via
+			// response.reasoning_text.delta events.
+			rsReq := &llm.RSRequest{
+				Model:           a.cfg.Model,
+				Instructions:    sysPrompt,
+				Input:           a.messagesToResponses(),
+				MaxOutputTokens: maxTok,
+				Tools:           a.buildResponsesToolDefs(),
+			}
+			text, calls, _, err := a.deepseekClient.SendResponsesStream(ctx, rsReq, onThinking, onText)
+			apiErr = err
+			resp = &llm.Response{}
+			if text != "" {
+				resp.Content = append(resp.Content, llm.ContentBlock{Type: "text", Text: text})
+			}
+			for _, c := range calls {
+				var input map[string]interface{}
+				if err := json.Unmarshal([]byte(c.Arguments), &input); err != nil || input == nil {
+					input = map[string]interface{}{}
+				}
+				resp.Content = append(resp.Content, llm.ContentBlock{
+					Type: "tool_use", ID: c.ID, Name: c.Name, Input: input,
+				})
+				if onTool != nil {
+					onTool(c.Name, c.ID)
+				}
+			}
+		case "openai":
 			// OpenAI-compatible endpoint (opencode.ai/zen/go for DeepSeek family):
 			// tools use `parameters`, tool results are role=tool messages, and the
 			// model answers with tool_calls.
@@ -686,7 +718,7 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 					onTool(c.Function.Name, c.ID)
 				}
 			}
-		} else {
+		default:
 			req := &llm.Request{
 				Model:     a.cfg.Model,
 				MaxTokens: maxTok,
@@ -1457,16 +1489,42 @@ func (a *Agent) buildToolDefs() []llm.Tool {
 	return defs
 }
 
+// protocol returns the API protocol for the active model: "anthropic"
+// (/v1/messages), "openai" (/v1/chat/completions), or "responses"
+// (/v1/responses — DeepSeek's Codex-compatible endpoint). The model-level
+// ToolsFormat override wins; otherwise the provider default applies.
+func (a *Agent) protocol() string {
+	if info := a.ModelInfo(); info != nil && info.ToolsFormat != "" {
+		return info.ToolsFormat
+	}
+	if a.provider != nil && a.provider.ToolsFormat != "" {
+		return a.provider.ToolsFormat
+	}
+	return "anthropic"
+}
+
 // useOpenAIProtocol reports whether the active model talks to an
 // OpenAI-compatible /v1/chat/completions endpoint (tool schema: parameters,
 // messages: role=tool, response: tool_calls) instead of the Anthropic
 // /v1/messages protocol. opencode.ai/zen/go routes the DeepSeek family
 // through the OpenAI endpoint only.
 func (a *Agent) useOpenAIProtocol() bool {
-	if info := a.ModelInfo(); info != nil && info.ToolsFormat != "" {
-		return info.ToolsFormat == "openai"
+	return a.protocol() == "openai"
+}
+
+// buildResponsesToolDefs builds Responses-API function tools from the
+// registry ({"type":"function","name","description","parameters"}).
+func (a *Agent) buildResponsesToolDefs() []llm.RSTool {
+	var defs []llm.RSTool
+	for _, t := range a.enabledTools() {
+		defs = append(defs, llm.RSTool{
+			Type:        "function",
+			Name:        t.Name(),
+			Description: t.Description(),
+			Parameters:  t.Schema(),
+		})
 	}
-	return a.provider != nil && a.provider.ToolsFormat == "openai"
+	return defs
 }
 
 // buildOpenAIToolDefs builds OpenAI-style function tools from the registry.
@@ -1594,6 +1652,125 @@ func (a *Agent) messagesToOpenAI(sysPrompt string) []llm.DSMessage {
 		}
 	}
 	return out
+}
+
+// messagesToResponses converts the internal (Anthropic-shaped) message list
+// to Responses-API input items. The system prompt goes into `instructions`
+// (handled by the caller); user text becomes message items, tool results
+// become function_call_output items, and assistant replies become message
+// items (output_text blocks) followed by function_call items. DeepSeek's
+// Responses API accepts no image input, so image blocks are dropped (the
+// server would replace them with placeholder text anyway).
+func (a *Agent) messagesToResponses() []llm.RSInputItem {
+	var items []llm.RSInputItem
+	appendText := func(role, text string) {
+		if text == "" {
+			return
+		}
+		items = append(items, llm.RSInputItem{Type: "message", Role: role, Content: text})
+	}
+	for _, m := range a.messages {
+		switch m.Role {
+		case "user":
+			var text strings.Builder
+			flush := func() {
+				if text.Len() > 0 {
+					appendText("user", text.String())
+					text.Reset()
+				}
+			}
+			for _, block := range contentBlocks(m.Content) {
+				switch b := block.(type) {
+				case llm.TextContent:
+					text.WriteString(b.Text)
+				case map[string]interface{}:
+					switch b["type"] {
+					case "text":
+						if s, ok := b["text"].(string); ok {
+							text.WriteString(s)
+						}
+					case "tool_result":
+						flush()
+						id, _ := b["tool_use_id"].(string)
+						items = append(items, llm.RSInputItem{
+							Type:   "function_call_output",
+							CallID: id,
+							Output: toolResultText(b),
+						})
+					}
+				}
+			}
+			flush()
+		case "assistant":
+			var blocks []llm.RSContentBlock
+			flushBlocks := func() {
+				if len(blocks) > 0 {
+					items = append(items, llm.RSInputItem{Type: "message", Role: "assistant", Content: blocks})
+					blocks = nil
+				}
+			}
+			for _, block := range contentBlocks(m.Content) {
+				switch b := block.(type) {
+				case llm.TextContent:
+					blocks = append(blocks, llm.RSContentBlock{Type: "output_text", Text: b.Text})
+				case llm.ToolUseContent:
+					flushBlocks()
+					args, _ := json.Marshal(b.Input)
+					items = append(items, llm.RSInputItem{
+						Type:      "function_call",
+						CallID:    b.ID,
+						Name:      b.Name,
+						Arguments: string(args),
+					})
+				case map[string]interface{}:
+					switch b["type"] {
+					case "text":
+						if s, ok := b["text"].(string); ok {
+							blocks = append(blocks, llm.RSContentBlock{Type: "output_text", Text: s})
+						}
+					case "tool_use":
+						flushBlocks()
+						id, _ := b["id"].(string)
+						name, _ := b["name"].(string)
+						input, _ := b["input"].(map[string]interface{})
+						args, _ := json.Marshal(input)
+						items = append(items, llm.RSInputItem{
+							Type:      "function_call",
+							CallID:    id,
+							Name:      name,
+							Arguments: string(args),
+						})
+					}
+				}
+			}
+			flushBlocks()
+		}
+	}
+	return items
+}
+
+// toolResultText extracts the plain-text portion of a tool_result block
+// (string content, or the text blocks of a content-block list).
+func toolResultText(block map[string]interface{}) string {
+	content, ok := block["content"]
+	if !ok {
+		return ""
+	}
+	switch c := content.(type) {
+	case string:
+		return c
+	case []interface{}:
+		var parts []string
+		for _, blk := range c {
+			if cb, ok := blk.(map[string]interface{}); ok && cb["type"] == "text" {
+				if s, ok := cb["text"].(string); ok {
+					parts = append(parts, s)
+				}
+			}
+		}
+		return strings.Join(parts, "")
+	}
+	return ""
 }
 
 // contentBlocks normalizes message content into a []interface{} of blocks.
