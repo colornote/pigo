@@ -46,6 +46,15 @@ type ToolUseContent struct {
 	Input map[string]interface{} `json:"input"`
 }
 
+// ReasoningContent is a thinking/reasoning block in an assistant message.
+// It is used to pass the model's reasoning_text back on the next turn —
+// the DeepSeek Responses API rejects a follow-up request that omits the
+// reasoning item that preceded a function_call (thinking mode).
+type ReasoningContent struct {
+	Type string `json:"type"` // "reasoning"
+	Text string `json:"text"`
+}
+
 type Tool struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`

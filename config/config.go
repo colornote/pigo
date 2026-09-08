@@ -148,8 +148,9 @@ func (c *Config) LoadSystemPrompt() {
 // config (duplicated from agent's registry) so config.Load can resolve the
 // right key without importing agent (which would create an import cycle).
 var providerEnvKeys = map[string]string{
-	"deepseek":    "DEEPSEEK_API_KEY",
-	"opencode-go": "OPENCODE_API_KEY",
+	"deepseek":           "DEEPSEEK_API_KEY",
+	"deepseek-responses": "DEEPSEEK_API_KEY",
+	"opencode-go":        "OPENCODE_API_KEY",
 }
 
 // EnvKeyFor returns the primary API key environment variable of a provider.

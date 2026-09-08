@@ -40,7 +40,7 @@ func TestSendResponsesStream(t *testing.T) {
 		{"response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","sequence_number":14,"item_id":"fc_1","output_index":2,"delta":"\"ls\"}"}`},
 		{"response.function_call_arguments.done", `{"type":"response.function_call_arguments.done","sequence_number":15,"item_id":"fc_1","output_index":2,"arguments":"{\"cmd\":\"ls\"}"}`},
 		{"response.output_item.done", `{"type":"response.output_item.done","sequence_number":16,"output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"bash","arguments":"{\"cmd\":\"ls\"}"}}`},
-		{"response.completed", `{"type":"response.completed","sequence_number":17,"response":{"id":"rsp_1","object":"response","status":"completed","model":"deepseek-v4-flash","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hello world"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"bash","arguments":"{\"cmd\":\"ls\"}"}],"usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":80},"output_tokens":45,"output_tokens_details":{"reasoning_tokens":20},"total_tokens":165}}}`},
+		{"response.completed", `{"type":"response.completed","sequence_number":17,"response":{"id":"rsp_1","object":"response","status":"completed","model":"deepseek-v4-flash","output":[{"type":"reasoning","id":"rs_1","status":"completed","content":[{"type":"reasoning_text","text":"Let me think carefully."}]},{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hello world"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"bash","arguments":"{\"cmd\":\"ls\"}"}],"usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":80},"output_tokens":45,"output_tokens_details":{"reasoning_tokens":20},"total_tokens":165}}}`},
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,14 +74,14 @@ func TestSendResponsesStream(t *testing.T) {
 	defer srv.Close()
 
 	c := NewDeepSeekClient("test-key", srv.URL)
-	var reasoning, content strings.Builder
+	var reasoningBuf, content strings.Builder
 	req := &RSRequest{
 		Model:        "deepseek-v4-flash",
 		Instructions: "You are a helpful assistant.",
 		Input:        "Hi, how are you?",
 	}
-	text, calls, final, err := c.SendResponsesStream(context.Background(), req,
-		func(s string) { reasoning.WriteString(s) },
+	text, reasoning, calls, final, err := c.SendResponsesStream(context.Background(), req,
+		func(s string) { reasoningBuf.WriteString(s) },
 		func(s string) { content.WriteString(s) },
 	)
 	if err != nil {
@@ -90,11 +90,14 @@ func TestSendResponsesStream(t *testing.T) {
 	if text != "Hello world" {
 		t.Errorf("text: got %q", text)
 	}
+	if reasoning != "Let me think carefully." {
+		t.Errorf("reasoning: got %q", reasoning)
+	}
 	if content.String() != "Hello world" {
 		t.Errorf("content stream: got %q", content.String())
 	}
-	if reasoning.String() != "Let me think carefully." {
-		t.Errorf("reasoning: got %q", reasoning.String())
+	if reasoningBuf.String() != "Let me think carefully." {
+		t.Errorf("reasoning stream: got %q", reasoningBuf.String())
 	}
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 function call, got %d", len(calls))
@@ -126,6 +129,9 @@ func TestSendResponsesStream(t *testing.T) {
 	if got := len(final.ToolCalls()); got != 1 {
 		t.Errorf("final.ToolCalls(): got %d", got)
 	}
+	if got := final.Reasoning(); got != "Let me think carefully." {
+		t.Errorf("final.Reasoning(): got %q", got)
+	}
 }
 
 // TestSendResponsesStreamFailed verifies the response.failed terminal event
@@ -139,7 +145,7 @@ func TestSendResponsesStreamFailed(t *testing.T) {
 	defer srv.Close()
 
 	c := NewDeepSeekClient("test-key", srv.URL)
-	_, _, final, err := c.SendResponsesStream(context.Background(), &RSRequest{Model: "m"}, nil, nil)
+	_, _, _, final, err := c.SendResponsesStream(context.Background(), &RSRequest{Model: "m"}, nil, nil)
 	if err == nil {
 		t.Fatal("expected error from failed response")
 	}
@@ -165,7 +171,7 @@ func TestSendResponsesStreamDataOnlyType(t *testing.T) {
 
 	c := NewDeepSeekClient("test-key", srv.URL)
 	var got strings.Builder
-	text, _, final, err := c.SendResponsesStream(context.Background(), &RSRequest{Model: "m"}, nil, func(s string) { got.WriteString(s) })
+	text, _, _, final, err := c.SendResponsesStream(context.Background(), &RSRequest{Model: "m"}, nil, func(s string) { got.WriteString(s) })
 	if err != nil {
 		t.Fatalf("SendResponsesStream: %v", err)
 	}

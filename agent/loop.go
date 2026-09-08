@@ -658,6 +658,7 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 
 		var resp *llm.Response
 		var apiErr error
+		var reasoningText string
 		switch protocol {
 		case "responses":
 			// DeepSeek Responses API (/v1/responses, Codex-compatible):
@@ -672,8 +673,13 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 				MaxOutputTokens: maxTok,
 				Tools:           a.buildResponsesToolDefs(),
 			}
-			text, calls, _, err := a.deepseekClient.SendResponsesStream(ctx, rsReq, onThinking, onText)
+			text, reasoning, calls, finalResp, err := a.deepseekClient.SendResponsesStream(ctx, rsReq, onThinking, onText)
 			apiErr = err
+			if reasoning != "" {
+				reasoningText = reasoning
+			} else if finalResp != nil {
+				reasoningText = finalResp.Reasoning()
+			}
 			resp = &llm.Response{}
 			if text != "" {
 				resp.Content = append(resp.Content, llm.ContentBlock{Type: "text", Text: text})
@@ -683,11 +689,19 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 				if err := json.Unmarshal([]byte(c.Arguments), &input); err != nil || input == nil {
 					input = map[string]interface{}{}
 				}
+				// The Responses API links function_call ↔ function_call_output
+				// via `call_id` (call_00_…), NOT the item `id` (uuid). Using the
+				// uuid makes the server intermittently lose the association and
+				// reject the follow-up with "reasoning_text must be passed back".
+				toolUseID := c.CallID
+				if toolUseID == "" {
+					toolUseID = c.ID
+				}
 				resp.Content = append(resp.Content, llm.ContentBlock{
-					Type: "tool_use", ID: c.ID, Name: c.Name, Input: input,
+					Type: "tool_use", ID: toolUseID, Name: c.Name, Input: input,
 				})
 				if onTool != nil {
-					onTool(c.Name, c.ID)
+					onTool(c.Name, toolUseID)
 				}
 			}
 		case "openai":
@@ -740,8 +754,11 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 			}
 		}
 
-		if resp == nil {
+		if apiErr != nil {
 			return "", fmt.Errorf("API: %w", apiErr)
+		}
+		if resp == nil {
+			return "", fmt.Errorf("API: empty response")
 		}
 
 		// Collect text and tool_use blocks from the response
@@ -767,6 +784,9 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 
 		// Build assistant message and save
 		var assistantContent []interface{}
+		if reasoningText != "" {
+			assistantContent = append(assistantContent, llm.ReasoningContent{Type: "reasoning", Text: reasoningText})
+		}
 		for _, block := range resp.Content {
 			switch block.Type {
 			case "text":
@@ -1711,6 +1731,16 @@ func (a *Agent) messagesToResponses() []llm.RSInputItem {
 			}
 			for _, block := range contentBlocks(m.Content) {
 				switch b := block.(type) {
+				case llm.ReasoningContent:
+					flushBlocks()
+					if b.Text != "" {
+						items = append(items, llm.RSInputItem{
+							Type: "reasoning",
+							Content: []llm.RSContentBlock{
+								{Type: "reasoning_text", Text: b.Text},
+							},
+						})
+					}
 				case llm.TextContent:
 					blocks = append(blocks, llm.RSContentBlock{Type: "output_text", Text: b.Text})
 				case llm.ToolUseContent:
@@ -1724,6 +1754,16 @@ func (a *Agent) messagesToResponses() []llm.RSInputItem {
 					})
 				case map[string]interface{}:
 					switch b["type"] {
+					case "reasoning":
+						flushBlocks()
+						if s, ok := b["text"].(string); ok && s != "" {
+							items = append(items, llm.RSInputItem{
+								Type: "reasoning",
+								Content: []llm.RSContentBlock{
+									{Type: "reasoning_text", Text: s},
+								},
+							})
+						}
 					case "text":
 						if s, ok := b["text"].(string); ok {
 							blocks = append(blocks, llm.RSContentBlock{Type: "output_text", Text: s})

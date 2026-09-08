@@ -194,6 +194,27 @@ func (r *RSResponse) ToolCalls() []RSToolCall {
 	return calls
 }
 
+// Reasoning returns the concatenated reasoning_text of a response object.
+// The Responses API requires this reasoning to be passed back on the next
+// turn (as a `reasoning` input item) whenever a function_call follows it.
+func (r *RSResponse) Reasoning() string {
+	if r == nil {
+		return ""
+	}
+	var parts []string
+	for _, item := range r.Output {
+		if item.Type != "reasoning" {
+			continue
+		}
+		for _, block := range item.Content {
+			if block.Type == "reasoning_text" {
+				parts = append(parts, block.Text)
+			}
+		}
+	}
+	return strings.Join(parts, "")
+}
+
 // rsUsageToUsage converts a Responses-API usage object into the canonical
 // llm.Usage form (cache hits from input_tokens_details.cached_tokens).
 // Reasoning tokens are already included in output_tokens by the API.
@@ -246,13 +267,14 @@ func (c *DeepSeekClient) SendResponses(ctx context.Context, req *RSRequest) (*RS
 // SendResponsesStream sends a streaming request to /v1/responses and parses
 // the semantic SSE events. Output text and reasoning deltas are routed to
 // the callbacks in real time; finished function calls (id + name +
-// concatenated arguments) and the terminal response object (which carries
-// usage and, on failure, the error) are returned.
+// concatenated arguments), the accumulated reasoning text, and the terminal
+// response object (which carries usage and, on failure, the error) are
+// returned.
 //
 // The stream ends with response.completed / response.incomplete /
 // response.failed — unlike chat/completions there is no data: [DONE].
 func (c *DeepSeekClient) SendResponsesStream(ctx context.Context, req *RSRequest,
-	onReasoning CoTCallback, onContent func(string)) (string, []RSToolCall, *RSResponse, error) {
+	onReasoning CoTCallback, onContent func(string)) (string, string, []RSToolCall, *RSResponse, error) {
 
 	req.Stream = true
 	if os.Getenv("PIGO_DEBUG") == "1" {
@@ -262,12 +284,12 @@ func (c *DeepSeekClient) SendResponsesStream(ctx context.Context, req *RSRequest
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("marshal: %w", err)
+		return "", "", nil, nil, fmt.Errorf("marshal: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/responses", bytes.NewReader(body))
 	if err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -275,13 +297,13 @@ func (c *DeepSeekClient) SendResponsesStream(ctx context.Context, req *RSRequest
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("http: %w", err)
+		return "", "", nil, nil, fmt.Errorf("http: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
-		return "", nil, nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(b))
+		return "", "", nil, nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(b))
 	}
 
 	var fullContent strings.Builder
@@ -413,10 +435,10 @@ func (c *DeepSeekClient) SendResponsesStream(ctx context.Context, req *RSRequest
 
 done:
 	if err := scanner.Err(); err != nil {
-		return fullContent.String(), nil, nil, fmt.Errorf("scan: %w", err)
+		return fullContent.String(), "", nil, nil, fmt.Errorf("scan: %w", err)
 	}
 	if apiErr != nil {
-		return fullContent.String(), nil, finalResp, apiErr
+		return fullContent.String(), "", nil, finalResp, apiErr
 	}
 
 	// Assemble finished function calls in arrival order.
@@ -433,7 +455,6 @@ done:
 			Arguments: a.args.String(),
 		})
 	}
-	_ = fullReasoning
 
-	return fullContent.String(), calls, finalResp, nil
+	return fullContent.String(), fullReasoning.String(), calls, finalResp, nil
 }

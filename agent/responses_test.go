@@ -100,6 +100,60 @@ func TestMessagesToResponsesToolResultBlocks(t *testing.T) {
 	}
 }
 
+// TestMessagesToResponsesReasoning verifies a reasoning block is passed
+// back as a `reasoning` input item (the Responses API requires the
+// reasoning_text that preceded a function_call to be replayed).
+func TestMessagesToResponsesReasoning(t *testing.T) {
+	a := &Agent{}
+	a.messages = []llm.Message{
+		{
+			Role: "user",
+			Content: []llm.TextContent{
+				{Type: "text", Text: "compute 2+2 with bash"},
+			},
+		},
+		{
+			Role: "assistant",
+			Content: []interface{}{
+				llm.ReasoningContent{Type: "reasoning", Text: "I should run bash."},
+				llm.ToolUseContent{Type: "tool_use", ID: "call_1", Name: "bash", Input: map[string]interface{}{"command": "echo $((2+2))"}},
+			},
+		},
+		{
+			Role: "user",
+			Content: []interface{}{
+				map[string]interface{}{
+					"type": "tool_result", "tool_use_id": "call_1", "content": "4",
+				},
+			},
+		},
+	}
+	items := a.messagesToResponses()
+	var kinds []string
+	for _, it := range items {
+		kinds = append(kinds, it.Type)
+	}
+	want := []string{"message", "reasoning", "function_call", "function_call_output"}
+	if strings.Join(kinds, ",") != strings.Join(want, ",") {
+		t.Fatalf("item kinds: got %v, want %v", kinds, want)
+	}
+	// The reasoning item carries reasoning_text content.
+	if items[1].Type != "reasoning" {
+		t.Fatalf("expected reasoning item, got %#v", items[1])
+	}
+	blocks, ok := items[1].Content.([]llm.RSContentBlock)
+	if !ok || len(blocks) != 1 || blocks[0].Type != "reasoning_text" || blocks[0].Text != "I should run bash." {
+		t.Errorf("reasoning content: %#v", items[1].Content)
+	}
+	// And the function_call still precedes its function_call_output.
+	if items[2].Type != "function_call" || items[2].CallID != "call_1" {
+		t.Errorf("function_call item: %#v", items[2])
+	}
+	if items[3].Type != "function_call_output" || items[3].CallID != "call_1" {
+		t.Errorf("function_call_output item: %#v", items[3])
+	}
+}
+
 // TestProtocolResolution verifies the protocol switch covers responses.
 func TestProtocolResolution(t *testing.T) {
 	a := New(newTestConfig(t.TempDir(), ""))
