@@ -166,15 +166,9 @@ func main() {
 		case "--model":
 			i++
 			if i < len(args) {
-				name := args[i]
-				if p := agent.ProviderForModel(name, ag.ProviderID()); p != nil {
-					if p.ID != ag.ProviderID() {
-						ag.SwitchProvider(p.ID)
-					}
-					ag.SwitchModel(name)
-				} else {
+				if !switchModelArg(args[i]) {
 					fmt.Fprintf(os.Stderr, "%s✗ Unknown model:%s %s (see %s--list-models%s)\n",
-						ANSIRed, ANSIReset, name, ANSIYellow, ANSIReset)
+						ANSIRed, ANSIReset, args[i], ANSIYellow, ANSIReset)
 				}
 			}
 		case "--thinking":
@@ -648,7 +642,7 @@ func showHelp() {
 	fmt.Printf("%sOptions:%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("  --help, -h        Show this help\n")
 	fmt.Printf("  --version, -v     Show version\n")
-	fmt.Printf("  --model <name>    Set model for single-shot\n")
+	fmt.Printf("  --model <name>    Set model for single-shot (provider/model:level also works)\n")
 	fmt.Printf("  --provider <id>   Set provider (deepseek, opencode-go, deepseek-responses)\n")
 	fmt.Printf("  --thinking <lvl>  Set thinking level\n")
 	fmt.Printf("  --print, -p       Non-interactive: print response and exit\n")
@@ -670,7 +664,7 @@ func showHelp() {
 	fmt.Printf("\n%sInteractive Commands:%s\n", ANSICyan, ANSIReset)
 	fmt.Printf("  %s/login%s             Select provider, paste API key (saves to ~/.pigo/.env)\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/logout%s            Remove the active provider's stored API key\n", ANSIYellow, ANSIReset)
-	fmt.Printf("  %s/model <name>%s     Switch model (auto-switches provider if needed)\n", ANSIYellow, ANSIReset)
+	fmt.Printf("  %s/model <name>%s     Switch model (auto-switches provider if needed; provider/model:level)\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/models%s           List models of the active provider\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/provider [id]%s    Show / switch provider\n", ANSIYellow, ANSIReset)
 	fmt.Printf("  %s/thinking <lvl>%s   Set thinking: off/low/medium/high/max\n", ANSIYellow, ANSIReset)
@@ -992,6 +986,42 @@ func runRepair(desc string, reader *bufio.Reader) {
 	}
 }
 
+// switchModelArg applies a pi-style model argument to the active agent:
+// "provider/model:level". A provider prefix is authoritative — the model is
+// resolved against that provider and the switch only happens when it exists
+// there (no partial provider switch on failure). Without a prefix the
+// current provider is preferred, auto-switching elsewhere when the model
+// lives on another provider (existing /model behavior). On success the
+// provider, model, and (when a :level suffix is present) thinking level are
+// all updated. Returns false when the spec names no known model.
+func switchModelArg(spec string) bool {
+	providerID, model, level := agent.ParseModelSpec(spec)
+	if model == "" {
+		return false
+	}
+	prefer := providerID
+	if prefer == "" {
+		prefer = ag.ProviderID()
+	}
+	// Preflight: never switch providers unless the target provider has the model.
+	p := agent.ProviderForModel(model, prefer)
+	if p == nil {
+		return false
+	}
+	if p.ID != ag.ProviderID() {
+		if !ag.SwitchProvider(p.ID) {
+			return false
+		}
+	}
+	if !ag.SwitchModel(model) {
+		return false
+	}
+	if level != "" {
+		ag.SetThinking(agent.ThinkingLevel(level))
+	}
+	return true
+}
+
 func dispatch(input string, reader *bufio.Reader) {
 	switch {
 	case input == "/quit" || input == "/exit":
@@ -1020,15 +1050,16 @@ func dispatch(input string, reader *bufio.Reader) {
 
 	case strings.HasPrefix(input, "/model "):
 		name := strings.TrimSpace(strings.TrimPrefix(input, "/model "))
-		// A model that lives on another provider switches provider too.
-		if p := agent.ProviderForModel(name, ag.ProviderID()); p != nil {
-			if p.ID != ag.ProviderID() {
-				ag.SwitchProvider(p.ID)
+		// pi-style spec: "provider/model:level" auto-switches provider and
+		// sets the thinking level in one shot.
+		if switchModelArg(name) {
+			_, _, level := agent.ParseModelSpec(name)
+			think := ""
+			if level != "" {
+				think = fmt.Sprintf("%s · thinking %s%s%s", ANSIGray, ANSIYellow, level, ANSIReset)
 			}
-			if ag.SwitchModel(name) {
-				fmt.Printf("%s✓%s Model: %s%s%s%s%s%s\n", ANSIGreen, ANSIReset, ANSIBold, ag.ProviderName(), ANSIReset, ANSIGray, " · "+ag.Model(), ANSIReset)
-				return
-			}
+			fmt.Printf("%s✓%s Model: %s%s%s%s%s%s\n", ANSIGreen, ANSIReset, ANSIBold, ag.ProviderName(), ANSIReset, ANSIGray, " · "+ag.Model(), think)
+			return
 		}
 		fmt.Printf("%sUnknown model:%s %s. Use %s/models%s to list.%s\n", ANSIRed, ANSIReset, name, ANSIYellow, ANSIReset, ANSIReset)
 

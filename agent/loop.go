@@ -673,6 +673,12 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 				MaxOutputTokens: maxTok,
 				Tools:           a.buildResponsesToolDefs(),
 			}
+			// Map the active thinking level to the Responses-API
+			// reasoning.effort (none/low/medium/high). ThinkOff leaves the
+			// field unset so the server keeps its default behavior.
+			if a.thinking != ThinkOff {
+				rsReq.Reasoning = &llm.RSReasoning{Effort: responsesEffort(a.thinking)}
+			}
 			text, reasoning, calls, finalResp, err := a.deepseekClient.SendResponsesStream(ctx, rsReq, onThinking, onText)
 			apiErr = err
 			if reasoning != "" {
@@ -1040,43 +1046,29 @@ func (a *Agent) Compact(ctx context.Context, customInstr string) error {
 		instr = "Focus on durable knowledge a future session can act on."
 	}
 
-	req := &llm.Request{
-		Model:     a.cfg.Model,
-		MaxTokens: 2048,
-		System:    "You are a meticulous conversation summarizer for a coding agent. Output structured, itemized bullets only — never prose paragraphs.",
-		Messages: []llm.Message{
-			{
-				Role: "user",
-				Content: []llm.TextContent{{
-					Type: "text",
-					Text: fmt.Sprintf(
-						"Summarize the following coding-agent conversation as an itemized logbook.\n\n%s\n\n"+
-							"Output ONLY bullet entries, grouped under exactly these headers:\n"+
-							"## Decisions\n- ...\n"+
-							"## Artifacts\n- path/to/file — what changed\n"+
-							"## Commands\n- command — outcome\n"+
-							"## Open Issues\n- ...\n\n"+
-							"Rules:\n"+
-							"- Every bullet is self-contained: a future session must understand it without the original transcript.\n"+
-							"- No paragraphs, no full rewrite of history, no preamble.\n"+
-							"- If a section has nothing, write \"- none\".\n\n"+
-							"%s\n\nSummary:",
-						transcript, instr),
-				}},
-			},
-		},
-	}
+	const compactSystem = "You are a meticulous conversation summarizer for a coding agent. Output structured, itemized bullets only — never prose paragraphs."
+	userText := fmt.Sprintf(
+		"Summarize the following coding-agent conversation as an itemized logbook.\n\n%s\n\n"+
+			"Output ONLY bullet entries, grouped under exactly these headers:\n"+
+			"## Decisions\n- ...\n"+
+			"## Artifacts\n- path/to/file — what changed\n"+
+			"## Commands\n- command — outcome\n"+
+			"## Open Issues\n- ...\n\n"+
+			"Rules:\n"+
+			"- Every bullet is self-contained: a future session must understand it without the original transcript.\n"+
+			"- No paragraphs, no full rewrite of history, no preamble.\n"+
+			"- If a section has nothing, write \"- none\".\n\n"+
+			"%s\n\nSummary:",
+		transcript, instr)
 
-	resp, err := a.client.SendWithContext(ctx, req)
+	// Route the summarizer through the ACTIVE protocol channel. "openai"
+	// and "responses" providers serve DeepSeek via an OpenAI-compatible
+	// endpoint — the Anthropic /v1/messages client (a.client) would POST to
+	// a nonexistent route there (e.g. opencode.ai/zen/go/v1/messages) and
+	// /compact would always fail.
+	summary, err := a.summarize(ctx, compactSystem, userText)
 	if err != nil {
 		return fmt.Errorf("summarize: %w", err)
-	}
-
-	summary := ""
-	for _, block := range resp.Content {
-		if block.Type == "text" {
-			summary += block.Text
-		}
 	}
 	summary = strings.TrimSpace(summary)
 	if summary == "" {
@@ -1104,6 +1096,49 @@ func (a *Agent) Compact(ctx context.Context, customInstr string) error {
 	a.saveEntry("compaction", summary, "")
 
 	return nil
+}
+
+// summarize sends a one-shot text (system+user) summarization request over
+// the ACTIVE protocol's transport and returns the model's text reply. The
+// Anthropic client is used for /v1/messages providers; OpenAI-compatible
+// chat completions (non-streaming, via the native client) for "openai" and
+// "responses" providers — compaction must work regardless of provider.
+func (a *Agent) summarize(ctx context.Context, system, userText string) (string, error) {
+	switch a.protocol() {
+	case "openai", "responses":
+		req := &llm.DSRequest{
+			Model:     a.cfg.Model,
+			MaxTokens: 2048,
+			Messages: []llm.DSMessage{
+				{Role: "system", Content: system},
+				{Role: "user", Content: userText},
+			},
+		}
+		return a.deepseekClient.SendChat(ctx, req)
+	default:
+		req := &llm.Request{
+			Model:     a.cfg.Model,
+			MaxTokens: 2048,
+			System:    system,
+			Messages: []llm.Message{{
+				Role: "user",
+				Content: []llm.TextContent{{
+					Type: "text", Text: userText,
+				}},
+			}},
+		}
+		resp, err := a.client.SendWithContext(ctx, req)
+		if err != nil {
+			return "", err
+		}
+		var sb strings.Builder
+		for _, block := range resp.Content {
+			if block.Type == "text" {
+				sb.WriteString(block.Text)
+			}
+		}
+		return sb.String(), nil
+	}
 }
 
 // shouldAutoCompact reports whether the conversation should be summarized
@@ -1452,11 +1487,14 @@ func (a *Agent) toolEnabled(name string) bool {
 // environment variables, mirroring pi (PI_SESSION_ID, PI_SESSION_FILE,
 // PI_PROVIDER, PI_MODEL, PI_REASONING_LEVEL). Values are resolved when each
 // command starts; PI_SESSION_FILE is omitted for ephemeral sessions.
+// PI_CODING_AGENT=true tells child processes they are running inside a
+// coding agent (pi parity).
 func (a *Agent) sessionEnv() map[string]string {
 	env := map[string]string{
 		"PI_PROVIDER":        a.ProviderID(),
 		"PI_MODEL":           a.Model(),
 		"PI_REASONING_LEVEL": string(a.Thinking()),
+		"PI_CODING_AGENT":    "true",
 	}
 	if a.session != nil {
 		env["PI_SESSION_ID"] = a.session.ID
@@ -1712,10 +1750,28 @@ func (a *Agent) messagesToResponses() []llm.RSInputItem {
 					case "tool_result":
 						flush()
 						id, _ := b["tool_use_id"].(string)
+						out := toolResultText(b)
+						// The Responses API requires function_call_output
+						// items to carry `output`; a result with no readable
+						// text (empty bash output, or an image-only read
+						// restored from a session entry) must still include
+						// the field or the server 400s with "missing field
+						// `output`". RSInputItem.Output is omitempty, so an
+						// empty string would drop the key entirely.
+						if out == "" {
+							out = "(tool produced no text output)"
+						}
+						if id == "" {
+							// Nothing to pair with (orphan/legacy entry):
+							// fall back to plain user text instead of a
+							// dangling function_call_output.
+							items = append(items, llm.RSInputItem{Type: "message", Role: "user", Content: out})
+							break
+						}
 						items = append(items, llm.RSInputItem{
 							Type:   "function_call_output",
 							CallID: id,
-							Output: toolResultText(b),
+							Output: out,
 						})
 					}
 				}
@@ -1839,6 +1895,24 @@ func (a *Agent) isCoTModel() bool {
 
 func (a *Agent) useCoT() bool {
 	return a.isCoTModel() && a.thinking != ThinkOff
+}
+
+// responsesEffort maps PiGo thinking levels to the Responses-API
+// reasoning.effort values (none/low/medium/high). max saturates at "high" —
+// the Responses API has no effort above high.
+func responsesEffort(l ThinkingLevel) string {
+	switch l {
+	case ThinkOff:
+		return "none"
+	case ThinkLow:
+		return "low"
+	case ThinkHigh:
+		return "high"
+	case ThinkMax:
+		return "high"
+	default:
+		return "medium"
+	}
 }
 
 // isMultimodalMain reports whether the ACTIVE main model can see images

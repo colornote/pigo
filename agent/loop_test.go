@@ -216,6 +216,9 @@ func TestSessionEnv(t *testing.T) {
 	if env["PI_REASONING_LEVEL"] != "medium" {
 		t.Errorf("thinking env: %q", env["PI_REASONING_LEVEL"])
 	}
+	if env["PI_CODING_AGENT"] != "true" {
+		t.Errorf("PI_CODING_AGENT env: %q, want true", env["PI_CODING_AGENT"])
+	}
 	if _, ok := env["PI_SESSION_FILE"]; ok {
 		t.Error("PI_SESSION_FILE must be unset for ephemeral/no-session runs")
 	}
@@ -268,5 +271,22 @@ func TestNewSession(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "old message") {
 		t.Errorf("old session content lost:\n%s", data)
+	}
+}
+
+// TestResponsesEffort verifies thinking levels map to Responses-API
+// reasoning.effort values (low/medium/high; max saturates at high).
+func TestResponsesEffort(t *testing.T) {
+	cases := map[ThinkingLevel]string{
+		ThinkOff:    "none",
+		ThinkLow:    "low",
+		ThinkMedium: "medium",
+		ThinkHigh:   "high",
+		ThinkMax:    "high",
+	}
+	for lvl, want := range cases {
+		if got := responsesEffort(lvl); got != want {
+			t.Errorf("responsesEffort(%q) = %q, want %q", lvl, got, want)
+		}
 	}
 }

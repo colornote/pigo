@@ -33,6 +33,51 @@ func TestProviderForModel(t *testing.T) {
 	}
 }
 
+// TestParseModelSpec verifies pi-style model argument parsing:
+// "provider/model:level" / "model:level" / "provider/model" / "model".
+func TestParseModelSpec(t *testing.T) {
+	tests := []struct {
+		spec, providerID, model, level string
+	}{
+		{"deepseek-chat", "", "deepseek-chat", ""},
+		{"deepseek-chat:high", "", "deepseek-chat", "high"},
+		{"opencode-go/mimo-v2.5", "opencode-go", "mimo-v2.5", ""},
+		{"deepseek/deepseek-chat:low", "deepseek", "deepseek-chat", "low"},
+		{"deepseek-v4-pro:max", "", "deepseek-v4-pro", "max"},
+		{"   ", "", "", ""},
+		{"", "", "", ""},
+		// Unknown provider prefix is NOT consumed — the whole token stays a model.
+		{"unknown-provider/gpt-4o", "", "unknown-provider/gpt-4o", ""},
+		// Model ids with colons that aren't a valid thinking level are untouched.
+		{"weird:model", "", "weird:model", ""},
+	}
+	for _, tc := range tests {
+		p, m, l := ParseModelSpec(tc.spec)
+		if p != tc.providerID || m != tc.model || l != tc.level {
+			t.Errorf("ParseModelSpec(%q) = (%q, %q, %q), want (%q, %q, %q)",
+				tc.spec, p, m, l, tc.providerID, tc.model, tc.level)
+		}
+	}
+}
+
+// TestIsThinkingLevel verifies the accepted thinking-level set used by the
+// model-spec :level suffix.
+func TestIsThinkingLevel(t *testing.T) {
+	for _, ok := range []string{"off", "low", "medium", "high", "max"} {
+		if !IsThinkingLevel(ok) {
+			t.Errorf("IsThinkingLevel(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "minimal", "xhigh", "HIGH ", "extreme"} {
+		if IsThinkingLevel(bad) {
+			t.Errorf("IsThinkingLevel(%q) = true, want false", bad)
+		}
+	}
+	if !IsThinkingLevel("high") || !IsThinkingLevel("off") {
+		t.Error("case handling regressed for IsThinkingLevel")
+	}
+}
+
 // TestProviderResolve verifies alias normalization and default fallback.
 func TestProviderResolve(t *testing.T) {
 	ds := ProviderByID("deepseek")

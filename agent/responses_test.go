@@ -100,6 +100,46 @@ func TestMessagesToResponsesToolResultBlocks(t *testing.T) {
 	}
 }
 
+// TestMessagesToResponsesEmptyToolResult is a regression test for the
+// DeepSeek /v1/responses 400 "missing field `output`": a tool_result with
+// no extractable text must still produce a function_call_output carrying
+// the required `output` field (never an omitted/empty one).
+func TestMessagesToResponsesEmptyToolResult(t *testing.T) {
+	a := &Agent{}
+	a.messages = []llm.Message{
+		{
+			Role: "user",
+			Content: []interface{}{
+				// Empty bash output (plain empty string content).
+				map[string]interface{}{
+					"type": "tool_result", "tool_use_id": "t1", "content": "",
+				},
+				// Image-only read result as restored from a session entry
+				// (toolResultContent wraps data URLs in an image block that
+				// has no text portion).
+				map[string]interface{}{
+					"type": "tool_result", "tool_use_id": "t2",
+					"content": []interface{}{
+						map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64", "media_type": "image/png", "data": "x"}},
+					},
+				},
+			},
+		},
+	}
+	items := a.messagesToResponses()
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %#v", items)
+	}
+	for i, it := range items {
+		if it.Type != "function_call_output" {
+			t.Fatalf("item %d: expected function_call_output, got %#v", i, it)
+		}
+		if it.Output == "" {
+			t.Errorf("item %d: output must never be empty (omitempty would drop the field and the server 400s)", i)
+		}
+	}
+}
+
 // TestMessagesToResponsesReasoning verifies a reasoning block is passed
 // back as a `reasoning` input item (the Responses API requires the
 // reasoning_text that preceded a function_call to be replayed).

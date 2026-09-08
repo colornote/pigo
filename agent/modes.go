@@ -33,6 +33,12 @@ const (
 	ThinkMax    ThinkingLevel = "max"
 )
 
+// IsThinkingLevel reports whether s is a supported thinking level
+// (off/low/medium/high/max). Used by the model-spec parser.
+func IsThinkingLevel(s string) bool {
+	return validThinking[ThinkingLevel(s)]
+}
+
 // BuildSystemPrompt 根据模式生成提示词
 func BuildSystemPrompt(mode Mode, contextInfo string) string {
 	return BuildSystemPromptWithDir(mode, contextInfo, "")
