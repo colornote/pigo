@@ -263,3 +263,47 @@ func ShortModelName(model string) string {
 	}
 	return model
 }
+
+// ParseModelSpec splits a pi-style model argument into its parts. Pi accepts
+// an optional `provider/` prefix (auto-switches provider) and an optional
+// `:level` thinking suffix:
+//
+//	"gpt-4o"                  → ("", "gpt-4o", "")
+//	"opencode-go/mimo-v2.5"   → ("opencode-go", "mimo-v2.5", "")
+//	"deepseek-chat:high"      → ("", "deepseek-chat", "high")
+//	"deepseek/deepseek-chat:high" → ("deepseek", "deepseek-chat", "high")
+//
+// The :level suffix is only split when it names a supported thinking level
+// (off/low/medium/high/max); model ids that happen to contain ':' are left
+// untouched. providerID is "" when no known provider prefix is present.
+func ParseModelSpec(spec string) (providerID, model, level string) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", "", ""
+	}
+	// Thinking-level suffix: split on the LAST ':' when the tail is a valid level.
+	if i := strings.LastIndexByte(spec, ':'); i > 0 {
+		if lvl := strings.ToLower(strings.TrimSpace(spec[i+1:])); IsThinkingLevel(lvl) {
+			level = lvl
+			spec = strings.TrimSpace(spec[:i])
+		}
+	}
+	// Provider prefix: split on the FIRST '/' when the head names a provider.
+	if i := strings.IndexByte(spec, '/'); i > 0 {
+		head := spec[:i]
+		if ProviderByID(head) != nil {
+			providerID = head
+			spec = spec[i+1:]
+		} else {
+			// Tolerate case/name mismatches ("OpenCode Go/mimo-v2.5").
+			for _, p := range Providers {
+				if strings.EqualFold(head, p.ID) || strings.EqualFold(head, p.Name) {
+					providerID = p.ID
+					spec = spec[i+1:]
+					break
+				}
+			}
+		}
+	}
+	return providerID, strings.TrimSpace(spec), level
+}

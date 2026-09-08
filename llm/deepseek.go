@@ -118,6 +118,89 @@ func NewDeepSeekClient(apiKey, baseURL string) *DeepSeekClient {
 	}
 }
 
+// DSChatMessage is the assistant message inside a non-streaming response.
+type DSChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// DSChatChoice is one choice of a non-streaming response.
+type DSChatChoice struct {
+	Index        int           `json:"index"`
+	Message      DSChatMessage `json:"message"`
+	FinishReason string        `json:"finish_reason,omitempty"`
+}
+
+// DSChatResponse is a non-streaming /v1/chat/completions response.
+type DSChatResponse struct {
+	ID      string         `json:"id"`
+	Object  string         `json:"object"`
+	Created int64          `json:"created"`
+	Model   string         `json:"model"`
+	Choices []DSChatChoice `json:"choices"`
+	Usage   *Usage         `json:"usage,omitempty"`
+}
+
+// Text returns the concatenated assistant text of the response.
+func (r *DSChatResponse) Text() string {
+	if r == nil {
+		return ""
+	}
+	var parts []string
+	for _, c := range r.Choices {
+		if c.Message.Content != "" {
+			parts = append(parts, c.Message.Content)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+// SendChat sends a non-streaming /v1/chat/completions request and returns
+// the assistant's text content. Usage is accumulated into TotalUsage. Used
+// for internal calls that don't need streaming (e.g. compaction summaries)
+// across every provider — including "openai"/"responses" providers whose
+// Anthropic /v1/messages endpoint may not exist.
+func (c *DeepSeekClient) SendChat(ctx context.Context, req *DSRequest) (string, error) {
+	req.Stream = false
+	req.StreamOptions = nil
+	if os.Getenv("PIGO_DEBUG") == "1" {
+		dbg, _ := json.MarshalIndent(req, "", "  ")
+		fmt.Fprintf(os.Stderr, "\n[DS SEND]\n%s\n", string(dbg))
+		fmt.Fprintf(os.Stderr, "[ENDPOINT] %s\n", c.baseURL+"/v1/chat/completions")
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("marshal: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("API error %d: %s", resp.StatusCode, string(b))
+	}
+
+	var result DSChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+	if result.Usage != nil {
+		c.TotalUsage = addUsage(c.TotalUsage, *result.Usage)
+	}
+	return result.Text(), nil
+}
+
 // CoTCallback is called for reasoning (thinking) content chunks
 type CoTCallback func(reasoning string)
 

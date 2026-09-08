@@ -342,8 +342,8 @@ func (s *Session) Summary() string {
 	firstMsg := ""
 	if msgCount > 0 {
 		firstMsg = s.Entries[0].Content
-		if len(firstMsg) > 60 {
-			firstMsg = firstMsg[:57] + "..."
+		if len([]rune(firstMsg)) > 60 {
+			firstMsg = string([]rune(firstMsg)[:57]) + "..."
 		}
 	}
 	ts := s.UpdatedAt
