@@ -90,6 +90,11 @@ func TestProviderResolve(t *testing.T) {
 // TestSwitchProviderPreservesState verifies SwitchProvider keeps the
 // session, message history, and thinking level while retargeting clients.
 func TestSwitchProviderPreservesState(t *testing.T) {
+	// Endpoint overrides leak from the host shell (PIGO_BASE_URL /
+	// PIGO_DS_BASE_URL); clear them so the switch assertions exercise the
+	// new provider's defaults rather than the stale env values.
+	t.Setenv("PIGO_BASE_URL", "")
+	t.Setenv("PIGO_DS_BASE_URL", "")
 	dir := t.TempDir()
 	a := New(newTestConfig(dir, ""))
 	a.SetThinking(ThinkHigh)
