@@ -37,23 +37,26 @@ func TestReadToolImageDataURL(t *testing.T) {
 	}
 }
 
-// TestReadToolImageHint verifies the default (hint) mode returns a pointer
-// to the vision tool instead of a base64 blob — text main models can't read
-// base64, so the raw image bytes would be token garbage.
-func TestReadToolImageHint(t *testing.T) {
+// TestReadToolImageMetadata verifies the default (text-model) mode returns
+// lightweight file metadata — never a base64 blob (unreadable token garbage
+// for text models) and no pointer to a vision tool.
+func TestReadToolImageMetadata(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTempImage(t, dir, "shot.png", []byte{0x89, 0x50, 0x4E, 0x47, 0x01})
 
-	r := &ReadTool{} // zero value → hint mode
+	r := &ReadTool{} // zero value → metadata mode
 	res := r.Execute(map[string]interface{}{"path": path})
 	if !res.Success {
 		t.Fatalf("read failed: %s", res.Error)
 	}
-	if !strings.Contains(res.Output, "vision tool") {
-		t.Errorf("expected vision-tool hint, got: %q", res.Output)
+	if strings.Contains(res.Output, "vision") {
+		t.Errorf("metadata mode must not reference a vision tool: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "image/png") {
+		t.Errorf("expected mime in metadata, got: %q", res.Output)
 	}
 	if strings.Contains(res.Output, "base64,") {
-		t.Errorf("hint mode must not leak base64 data: %q", res.Output)
+		t.Errorf("metadata mode must not leak base64 data: %q", res.Output)
 	}
 }
 

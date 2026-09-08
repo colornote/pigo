@@ -95,7 +95,7 @@ pigo -c "continue from where we left off"
 Config is loaded from `~/.pigo/.env` (global) and `./.env` (project, overrides). Context files `AGENTS.md` / `CLAUDE.md` are injected into the system prompt.
 
 On first run, PiGo creates `~/.pigo/AGENTS.md` with a starter template
-(documenting all tools including `vision`); it loads automatically on every
+(documenting every tool); it loads automatically on every
 startup and you can edit it freely — PiGo never overwrites it. Project-level
 `AGENTS.md` / `CLAUDE.md` are appended on top. Disable all context loading
 with `--no-context-files`/`-nc`.
@@ -118,7 +118,8 @@ with `--no-context-files`/`-nc`.
 
 | Provider | ID | API key | Models |
 |---|---|---|---|
-| DeepSeek | `deepseek` (default) | `DEEPSEEK_API_KEY` | `deepseek-v4-flash`, `deepseek-v4-pro[1m]`, `deepseek-chat`, `deepseek-reasoner` 🧠 |
+| DeepSeek | `deepseek` (default) | `DEEPSEEK_API_KEY` | `deepseek-v4-flash`, `deepseek-v4-pro[1m]`, `deepseek-chat`, `deepseek-reasoner` 🧠, `deepseek-v4-flash-vision-exp` (视觉) |
+| DeepSeek Responses | `deepseek-responses` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-v4-flash-vision-exp` (视觉), `deepseek-v4.1-flash-expires-on-0910` (视觉预览) + 原生 `web_search` |
 | OpenCode Go | `opencode-go` | `OPENCODE_API_KEY` | 16 curated open models incl. DeepSeek V4, Kimi, GLM, Qwen, MiniMax, Grok (`/models` to list) |
 
 [OpenCode Go](https://opencode.ai/go) is a low-cost subscription ($5 first month, then $10/month) giving reliable access to popular open coding models; it is API-key compatible like any other provider.
@@ -134,6 +135,8 @@ with `--no-context-files`/`-nc`.
 | `deepseek-v4-flash` | V4 Flash — fast, default | |
 | `deepseek-v4-pro[1m]` | V4 Pro 1M — long context | |
 | `deepseek-v4-pro` | alias → `deepseek-v4-pro[1m]` (deepseek) / real model (opencode-go) | |
+| `deepseek-v4-flash-vision-exp` | V4 Flash Vision — official experimental image input | |
+| `deepseek-v4.1-flash-expires-on-0910` | V4.1 Flash preview — vision, Responses API (expires 2026-09-10) | |
 | `deepseek-chat` | Chat — general | |
 | `deepseek-reasoner` | Reasoner — deep reasoning | 🧠 online CoT streaming |
 
@@ -141,42 +144,29 @@ OpenCode Go adds `deepseek-v4-pro`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k3`, `q
 
 ### Vision (multimodal)
 
-Two ways to work with images:
+Image analysis uses the model's **native** multimodal capability — no third-party vision tool or sub-agent. Pick a vision-capable main model and `read` image files directly: they come back as base64 data URLs and travel to the model as real image content (`image_url` on the OpenAI protocol, Anthropic `image` blocks, or Responses API `input_image` parts).
 
-**1. Vision sub-agent tool (recommended with text models like DeepSeek).**
-The `vision` tool is a global bridge to the multimodal `mimo-v2.5` model on
-opencode-go. Your main agent (e.g. DeepSeek) calls it like any other tool; the
-vision model reads the image and returns a text description the main agent
-continues from:
+**DeepSeek official vision model:**
 
 ```bash
-# Set the vision key once:
-#   export OPENCODE_API_KEY=oc-...   (or /login opencode-go, then /reload)
-
-# Then just point the main agent at an image:
-pigo "Read screenshot.png and describe the UI"
-pigo "What does docs/architecture.png show? Can you spot any issues?"
+pigo --model deepseek-v4-flash-vision-exp "Read screenshot.png and describe the UI"
 ```
 
-The main agent uses `vision <path> [question]`; no provider switch needed.
-When the vision tool runs, you'll see the sub-agent's output streamed live
-on stderr — its reasoning (💭 视觉推理) and answer (💡 视觉回答) — while the
-same text is fed back to the main agent as the tool result.
-
-**2. Direct multimodal model.** `mimo-v2.5` / `mimo-v2.5-pro` as the *main*
-model see images via the `read` tool:
+**opencode-go multimodal models** (`mimo-v2.5` / `mimo-v2.5-pro`) work the same way:
 
 ```bash
-pigo --model mimo-v2.5 "Read screenshot.png and describe the UI"
+pigo --model mimo-v2.5 "What does docs/architecture.png show? Can you spot any issues?"
 ```
 
-Configuration (optional — defaults shown):
+Text-only main models get lightweight file metadata from `read` — switch the main model to a vision-capable one to analyze images. Switch at runtime with `/model <name>`; list with `/models`.
 
-| Variable | Default | Description |
-|---|---|---|
-| `OPENCODE_API_KEY` | — | Vision model auth (also used by opencode-go) |
-| `PIGO_VISION_MODEL` | `mimo-v2.5` | Vision sub-agent model |
-| `PIGO_VISION_BASE_URL` | `https://opencode.ai/zen/go` | Vision endpoint |
+### Web search (Responses API)
+
+`deepseek-responses` requests advertise DeepSeek's native Codex-style `web_search` tool by default — the model decides when a search is useful and results stream back as message content. Disable with `PIGO_WEB_SEARCH=0`.
+
+```bash
+PIGO_PROVIDER=deepseek-responses pigo "DeepSeek 官方最近发布了哪些新模型？"
+```
 
 Switch at runtime with `/model <name>`; list with `/models`. Only models flagged 🧠 (native `reasoning_content` CoT) use the native CoT path — everything else uses the Anthropic-compatible tool-calling loop.
 

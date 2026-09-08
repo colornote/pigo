@@ -52,7 +52,7 @@ pigo 启动和 `/reload` 时自动扫描 `packages/`（项目级）与 `~/.pigo/
 1. 先用 `read packages/<name>/SKILL.md` 读取完整用法（渐进式披露）
 2. 按 SKILL.md 的说明调用对应的 CLI / 脚本
 3. 扩展包是独立能力（不依赖 pigo 核心），不要修改其源码，除非任务明确要求
-4. 截图类输出（如 `browser shot`）配合 `vision` 工具使用
+4. 截图类输出（如 `browser shot`）→ 保存为图片后用 `read` 查看；若主模型不支持图像，切换多模态模型（`deepseek-v4-flash-vision-exp` / `mimo-v2.5`）再分析
 
 当前已有：`packages/browser/` — CDP Chrome 自动化（open/tabs/eval/click/type/text/shot）。
 

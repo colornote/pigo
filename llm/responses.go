@@ -29,16 +29,24 @@ type RSContentBlock struct {
 	Text string `json:"text,omitempty"`
 }
 
+// RSInputImage is an image content part inside a request item (input_image).
+// Only the official vision model (deepseek-v4-flash-vision-exp) processes it
+// as a real image; other models replace it with placeholder text.
+type RSInputImage struct {
+	Type     string `json:"type"`      // input_image
+	ImageURL string `json:"image_url"` // http(s) URL or data: URL (≤32 MiB)
+}
+
 // RSInputItem is one item of the request `input` array.
 type RSInputItem struct {
-	Type      string            `json:"type"` // message / function_call / function_call_output / reasoning / web_search_call
-	Role      string            `json:"role,omitempty"`
-	Content   interface{}       `json:"content,omitempty"` // string or []RSContentBlock
-	CallID    string            `json:"call_id,omitempty"`
-	Name      string            `json:"name,omitempty"`
-	Arguments string            `json:"arguments,omitempty"`
-	Output    string            `json:"output,omitempty"`
-	Summary   interface{}       `json:"summary,omitempty"`
+	Type      string      `json:"type"` // message / function_call / function_call_output / reasoning / web_search_call
+	Role      string      `json:"role,omitempty"`
+	Content   interface{} `json:"content,omitempty"` // string or []interface{} of RSContentBlock / RSInputImage parts
+	CallID    string      `json:"call_id,omitempty"`
+	Name      string      `json:"name,omitempty"`
+	Arguments string      `json:"arguments,omitempty"`
+	Output    interface{} `json:"output,omitempty"` // string, or []interface{} of input_text / input_image parts
+	Summary   interface{} `json:"summary,omitempty"`
 }
 
 // RSTool is a tool definition in Responses API format. function and
@@ -96,9 +104,9 @@ type RSOutputItem struct {
 // output_tokens use the same field names as llm.Usage; the cache and
 // reasoning details are nested.
 type RSUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	TotalTokens        int `json:"total_tokens"`
 	InputTokensDetails struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"input_tokens_details"`

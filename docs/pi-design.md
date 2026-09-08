@@ -50,14 +50,15 @@ pigo/
 - [x] Bash session env vars — `PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`, `PI_REASONING_LEVEL` exported to every bash tool command (pi parity; `PI_SESSION_FILE` unset for ephemeral sessions).
 - [x] `/new` — start a fresh session (in-memory history reset; old session stays persisted).
 - [x] ESC interrupt + follow-up steering — fixed: `runWithESC` now matches wrapped `context.Canceled` via `errors.Is` (the streaming HTTP error is `"API: Get …: context canceled"`, which a bare `==` check missed — the follow-up flow was dead code), and the retry sends only the follow-up (the original prompt is already in history, so re-sending it duplicated the user message in the session JSONL and model context).
-- [x] Multimodal vision — opencode-go `mimo-v2.5` / `mimo-v2.5-pro` (verified against `opencode.ai/zen/go/v1/models`). `read` returns image files (png/jpg/jpeg/gif/webp/bmp ≤5MB) as base64 data URLs; the agent loop converts them to Anthropic `image` content blocks (OpenAI protocol: `image_url`) so vision models see the picture.
-- [x] Vision sub-agent tool (`vision`) — a global tool that calls a multimodal model (default `mimo-v2.5` on opencode-go, configurable via `PIGO_VISION_MODEL` / `PIGO_VISION_BASE_URL`, auth `OPENCODE_API_KEY`) to analyze an image and return a text description to the MAIN agent. Text models (DeepSeek) never see raw base64: `read` returns a `[Image: … use the vision tool …]` hint for text main models (`ImageModeHint`) and a base64 data URL only for multimodal main models (`ImageModeDataURL`). Runner injected by `agent.New`/`Reload` (`tools.VisionTool.Runner`), tools package stays free of llm imports.
+- [x] Multimodal vision via official DeepSeek vision models — `deepseek-v4-flash-vision-exp` (official experimental vision model) and `deepseek-v4.1-flash-expires-on-0910` (V4.1 Flash preview, vision, expires 2026-09-10, Responses API only) on the DeepSeek providers, plus opencode-go `mimo-v2.5` / `mimo-v2.5-pro`. `read` returns image files (png/jpg/jpeg/gif/webp/bmp ≤5MB) as base64 data URLs when the main model is multimodal; the agent loop converts them to Anthropic `image` content blocks (OpenAI protocol: `image_url`, Responses API: `input_image` content parts in message items / function_call_output outputs) so the vision model sees the picture.
+- [x] Official web search (`web_search`, Responses API) — `deepseek-responses` requests advertise DeepSeek's native Codex-style `web_search` tool (`PIGO_WEB_SEARCH=0` to disable); the model decides when to search, results stream back as message content.
+- [x] Vision sub-agent removed — the third-party `vision` tool (mimo-v2.5 sub-agent via `tools.VisionTool`/`agent.runVision`) and every injected prompt around it (system-prompt "use the vision tool" boilerplate, `read`'s `[Image: … use the vision tool …]` hint mode, `PIGO_VISION_MODEL`/`PIGO_VISION_BASE_URL`) are deleted. Text models get image metadata only; image analysis is done by the official vision model as the MAIN model.
 - [x] Persistent structured memory (`~/.pigo/memory.md`, ACE-style) — `/compact` now asks the model for itemized bullets only (`## Decisions` / `## Artifacts` / `## Commands` / `## Open Issues`, every bullet self-contained), appends the result as a timestamped entry to `~/.pigo/memory.md`, and `buildSysPrompt` injects the logbook into the normal-mode system prompt. Durable knowledge survives across sessions; self-iterate/auto-repair modes stay unsteered. (Harness engineering: Pattern 2 "file system as persistent memory" + ACE context engineering.)
 - [x] Verifier-grounded auto-repair — `/repair` (and the `r`-key / auto-repair triggers) now run a fix→verify→refine loop: after the model edits, `verifyRepo()` runs `go build -o pigo .` + `go vet ./...`; on failure the errors are fed back with "analyze the ROOT CAUSE, do not repeat the same approach", up to 3 rounds. A fix is accepted only when build+vet pass. (Harness engineering: Self-Harness/AHE evidence-driven, verifier-grounded edits.)
 - [x] DeepSeek Responses API (`deepseek-responses` provider, `/v1/responses`) — Codex-compatible protocol: `instructions` → system prompt, input items (`message` / `function_call` / `function_call_output`), semantic SSE events (`response.output_text.delta` / `response.reasoning_text.delta` / `response.function_call_arguments.delta` / `response.completed`…, no `[DONE]`), terminal-event usage (`input_tokens_details.cached_tokens` → cache-hit accounting). Per https://api-docs.deepseek.com/zh-cn/guides/responses_api — `llm/responses.go` + `agent/responses_test.go`.
 
 ## Tools Policy
-- **8 tools: read, write, edit, bash, grep, find, ls, vision**
+- **7 tools: read, write, edit, bash, grep, find, ls**
 - grep/find/ls were re-added (commit 705ad4c) — they're useful for the model
 - No evidence of infinite loops with current prompt constraints
 
@@ -70,9 +71,9 @@ pigo/
 按实现性价比排序，均与现有架构兼容，小步可落地。
 
 - [ ] **通用 sub-agent 工具**（Pattern 3: Sub-agent and Backend Jobs）
-  - 动机：vision 子代理已验证 runner 注入模式（`tools.VisionTool.Runner` + `agent.runVision`），可抽象为通用子代理，让主代理并行探索多假设、隔离子任务，不污染主上下文。文章：并行要显式且可检视，子代理输出写文件而非只存在于 transient chat。
+  - 动机：曾用 runner 注入模式实现 vision 子代理（后随官方视觉模型直连而移除），该结构可抽象为通用子代理，让主代理并行探索多假设、隔离子任务，不污染主上下文。文章：并行要显式且可检视，子代理输出写文件而非只存在于 transient chat。
   - 实现要点：
-    - 新工具 `spawn`（参数：prompt / tools 白名单 / 是否独立 model），`tools.SubAgentTool` 复用 VisionTool 的 runner 注入结构
+    - 新工具 `spawn`（参数：prompt / tools 白名单 / 是否独立 model），`tools.SubAgentTool` 复用 runner 注入结构
     - 子代理独立 `llm.Client` + 独立消息列表，跑完把结论写入 `~/.pigo/subagents/<id>.md`（结果落盘 = 可恢复、可审计）
     - 配套 `list_agents`（列出子代理及其状态/文件）、`wait`（阻塞等待完成）、`resume`（从落盘结果恢复）
     - 权限继承主代理的 tool filter；上下文超长时子代理内部可先 compaction

@@ -8,8 +8,8 @@ import (
 )
 
 // TestEnsureGlobalContextCreatesStarter verifies first run creates
-// ~/.pigo/AGENTS.md with the vision tool documented, and later runs never
-// overwrite user customizations.
+// ~/.pigo/AGENTS.md documenting image handling via the multimodal read
+// path, and later runs never overwrite user customizations.
 func TestEnsureGlobalContextCreatesStarter(t *testing.T) {
 	home := t.TempDir()
 	os.Setenv("HOME", home)
@@ -24,8 +24,11 @@ func TestEnsureGlobalContextCreatesStarter(t *testing.T) {
 		t.Fatalf("read starter: %v", err)
 	}
 	s := string(data)
-	if !strings.Contains(s, "vision") {
-		t.Errorf("starter AGENTS.md should document the vision tool:\n%s", s)
+	if strings.Contains(s, "vision tool") || strings.Contains(s, "mimo") {
+		t.Errorf("starter AGENTS.md must not document the removed vision sub-agent:\n%s", s)
+	}
+	if !strings.Contains(s, "deepseek-v4-flash-vision-exp") {
+		t.Errorf("starter AGENTS.md should document the official vision model:\n%s", s)
 	}
 	if !strings.Contains(s, "PiGo Agent Instructions") {
 		t.Errorf("starter AGENTS.md should carry a title:\n%s", s)

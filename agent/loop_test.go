@@ -131,7 +131,7 @@ func TestToolFilterAllowlist(t *testing.T) {
 	if !a.toolEnabled("read") || !a.toolEnabled("grep") {
 		t.Error("allowlisted tools should be enabled")
 	}
-	if a.toolEnabled("write") || a.toolEnabled("edit") || a.toolEnabled("vision") {
+	if a.toolEnabled("write") || a.toolEnabled("edit") || a.toolEnabled("find") {
 		t.Error("non-allowlisted tools must be disabled")
 	}
 	if !a.toolFilterActive() {
@@ -143,13 +143,13 @@ func TestToolFilterAllowlist(t *testing.T) {
 // tools while keeping the rest.
 func TestToolFilterExclude(t *testing.T) {
 	a := New(newTestConfig(t.TempDir(), ""))
-	a.applyToolFilter(nil, []string{"bash", "vision"}, false)
+	a.applyToolFilter(nil, []string{"bash", "find"}, false)
 
 	names := a.enabledToolNames()
 	if len(names) != len(allToolNames())-2 {
 		t.Errorf("exclude: expected %d tools, got %d (%v)", len(allToolNames())-2, len(names), names)
 	}
-	if a.toolEnabled("bash") || a.toolEnabled("vision") {
+	if a.toolEnabled("bash") || a.toolEnabled("find") {
 		t.Error("excluded tools must be disabled")
 	}
 	if !a.toolEnabled("read") || !a.toolEnabled("edit") {

@@ -655,7 +655,7 @@ func showHelp() {
 	fmt.Printf("  --no-context-files Disable AGENTS.md/CLAUDE.md loading (-nc)\n")
 	fmt.Printf("  --api-key <key>   Override API key (overrides env vars)\n")
 	fmt.Printf("  --list-models     List available models and exit\n")
-	fmt.Printf("  --tools <list>    Only enable these tools: read,write,edit,bash,grep,find,ls,vision (-t)\n")
+	fmt.Printf("  --tools <list>    Only enable these tools: read,write,edit,bash,grep,find,ls (-t)\n")
 	fmt.Printf("  --exclude-tools <list> Disable specific tools (-xt)\n")
 	fmt.Printf("  --no-tools        Disable all tools (text-only) (-nt)\n")
 	fmt.Printf("\n%sFile Arguments:%s\n", ANSICyan, ANSIReset)
@@ -709,7 +709,8 @@ func fileArgPrompt(path string) string {
 	}
 	// Binary/image files can't be inlined into the prompt string — reference
 	// the path so the model can read them with the read tool. Multimodal
-	// models (e.g. opencode-go mimo-v2.5) see the image contents that way.
+	// main models (e.g. deepseek-v4-flash-vision-exp) see the image contents
+	// that way (read returns a base64 data URL).
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf":
 		return fmt.Sprintf("[@%s: image/binary file — use the read tool to view it]", path)

@@ -103,6 +103,14 @@ var DeepSeekProvider = Provider{
 			Reasoning: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
 			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.014},
 		},
+		// deepseek-v4-flash-vision-exp — official experimental vision model:
+		// accepts image input (JPEG/PNG/GIF/WebP) alongside text. Registered
+		// as multimodal so read returns base64 data URLs the model can see.
+		"deepseek-v4-flash-vision-exp": {
+			ID: "deepseek-v4-flash-vision-exp", Name: "V4 Flash Vision (exp)", Description: "实验 · 视觉输入",
+			Reasoning: true, Multimodal: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
+			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.014},
+		},
 		"deepseek-v4-pro[1m]": {
 			ID: "deepseek-v4-pro[1m]", Name: "V4 Pro 1M", Description: "长上下文",
 			Reasoning: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
@@ -147,6 +155,22 @@ var DeepSeekResponsesProvider = Provider{
 			ID: "deepseek-v4-pro", Name: "V4 Pro", Description: "更强 · Responses API",
 			Reasoning: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
 			Pricing: llm.ModelPricing{InputPrice: 0.28, OutputPrice: 0.56, CacheHit: 0.028},
+		},
+		// Official experimental vision model: image input arrives as
+		// input_image content parts in message/function_call_output items.
+		"deepseek-v4-flash-vision-exp": {
+			ID: "deepseek-v4-flash-vision-exp", Name: "V4 Flash Vision (exp)", Description: "实验 · 视觉输入 · Responses API",
+			Reasoning: true, Multimodal: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
+			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.014},
+		},
+		// V4.1 Flash preview (expires 2026-09-10) — verified live against
+		// /v1/responses: accepts input_image content parts (vision-capable).
+		// Note the id ends in -expires-on-0910 (with an s) — the legacy
+		// -expire-on-0910 spelling is rejected by the API.
+		"deepseek-v4.1-flash-expires-on-0910": {
+			ID: "deepseek-v4.1-flash-expires-on-0910", Name: "V4.1 Flash (preview)", Description: "视觉 · Responses API · 预览至 09-10",
+			Reasoning: true, Multimodal: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
+			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.014},
 		},
 	},
 }
