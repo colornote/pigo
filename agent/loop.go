@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -64,6 +63,11 @@ func New(cfg *config.Config) *Agent {
 	// Model: must exist on the active provider, otherwise the provider default.
 	model := provider.Resolve(cfg.Model)
 	if model != cfg.Model {
+		// Never fail hard on a stale/unknown model id — but surface it so a
+		// typo'd or expired PIGO_MODEL (e.g. an old preview id like
+		// deepseek-v4.1-expire-on-0910) can't silently run the wrong model.
+		fmt.Fprintf(os.Stderr, "%s⚠ model %q not found on %s — falling back to default %q%s\n",
+			ANSIYellow, cfg.Model, provider.ID, model, ANSIReset)
 		cfg.Model = model
 	}
 	client := llm.New(cfg.APIKey, baseURL, model)
@@ -76,9 +80,6 @@ func New(cfg *config.Config) *Agent {
 	reg.Register(&tools.LsTool{})
 	reg.Register(&tools.GrepTool{})
 	reg.Register(&tools.FindTool{})
-	// Vision sub-agent tool: analyze images via a multimodal model
-	// (mimo-v2.5 on opencode-go) and return a text description. The runner
-	// is injected later (after cfg is captured) so it reads live env vars.
 	// Session manager rooted at ~/.pigo/sessions, overridable via
 	// PIGO_SESSION_DIR env var or the --session-dir CLI flag.
 	home, _ := os.UserHomeDir()
@@ -109,8 +110,6 @@ func New(cfg *config.Config) *Agent {
 	}
 	a.SetThinking(ThinkingLevel(cfg.ThinkingLevel))
 	a.applyToolFilter(cfg.Tools, cfg.ExcludeTools, cfg.NoTools)
-	// Wire the vision sub-agent tool to the live runner (reads env on call).
-	reg.Register(&tools.VisionTool{Runner: a.runVision})
 	a.refreshGitContext()
 	return a
 }
@@ -164,7 +163,12 @@ func (a *Agent) SwitchProvider(id string) bool {
 		a.cfg.APIKey = prevKey
 	}
 	// Model: keep current if it exists on the new provider, else default.
+	prevModel := a.cfg.Model
 	a.cfg.Model = p.Resolve(a.cfg.Model)
+	if a.cfg.Model != prevModel {
+		fmt.Fprintf(os.Stderr, "%s⚠ model %q not available on %s — using default %q%s\n",
+			ANSIYellow, prevModel, p.ID, a.cfg.Model, ANSIReset)
+	}
 	a.client = llm.New(a.cfg.APIKey, a.baseURL, a.cfg.Model)
 	a.deepseekClient = llm.NewDeepSeekClient(a.cfg.APIKey, a.dsBaseURL)
 	a.client.TotalUsage = llm.Usage{}
@@ -679,6 +683,14 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 			if a.thinking != ThinkOff {
 				rsReq.Reasoning = &llm.RSReasoning{Effort: responsesEffort(a.thinking)}
 			}
+			// DeepSeek's Responses API ships a native web_search tool
+			// (Codex-style). Advertise it alongside the function tools so the
+			// model can research live web content; set PIGO_WEB_SEARCH=0 to
+			// disable. The model decides when to search (tool_choice stays
+			// auto); search results arrive as message content in the stream.
+			if a.webSearchEnabled() {
+				rsReq.Tools = append(rsReq.Tools, llm.RSTool{Type: "web_search"})
+			}
 			text, reasoning, calls, finalResp, err := a.deepseekClient.SendResponsesStream(ctx, rsReq, onThinking, onText)
 			apiErr = err
 			if reasoning != "" {
@@ -854,15 +866,15 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 			}
 
 			// Read: route image files per the MAIN model's capabilities —
-			// multimodal models get the base64 data URL (they can see it),
-			// text models get a pointer to the vision tool (a base64 blob
-			// would be unreadable token garbage for them).
+			// multimodal models (e.g. deepseek-v4-flash-vision-exp) get the
+			// base64 data URL they can see; text models get metadata only
+			// (a raw base64 blob would be unreadable token garbage).
 			if tu.Name == "read" {
 				if rt, ok := tool.(*tools.ReadTool); ok {
 					if a.isMultimodalMain() {
 						rt.ImageMode = tools.ImageModeDataURL
 					} else {
-						rt.ImageMode = tools.ImageModeHint
+						rt.ImageMode = ""
 					}
 				}
 			}
@@ -875,13 +887,6 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 				if bt, ok := tool.(*tools.BashTool); ok {
 					bt.Ctx = ctx
 					bt.Env = a.sessionEnv()
-				}
-			}
-
-			// Same for the vision sub-agent call — ESC/Ctrl+C cancels it.
-			if tu.Name == "vision" {
-				if vt, ok := tool.(*tools.VisionTool); ok {
-					vt.Ctx = ctx
 				}
 			}
 
@@ -1570,6 +1575,17 @@ func (a *Agent) useOpenAIProtocol() bool {
 	return a.protocol() == "openai"
 }
 
+// webSearchEnabled reports whether the native web_search tool is advertised
+// to the model. Only the Responses API (/v1/responses) provides it; set
+// PIGO_WEB_SEARCH=0 to disable. On by default so the model can research
+// live web content when it deems a search useful.
+func (a *Agent) webSearchEnabled() bool {
+	if a.protocol() != "responses" {
+		return false
+	}
+	return os.Getenv("PIGO_WEB_SEARCH") != "0"
+}
+
 // buildResponsesToolDefs builds Responses-API function tools from the
 // registry ({"type":"function","name","description","parameters"}).
 func (a *Agent) buildResponsesToolDefs() []llm.RSTool {
@@ -1605,8 +1621,8 @@ func (a *Agent) buildOpenAIToolDefs() []llm.DSTool {
 // OpenAI chat-completions format, prepending the system prompt. user
 // tool_result blocks become role=tool messages; assistant tool_use blocks
 // become tool_calls entries. Image content blocks (Anthropic "image" form)
-// are converted to OpenAI "image_url" blocks so multimodal models like
-// mimo-v2.5 can see pictures read via the read tool.
+// are converted to OpenAI "image_url" blocks so multimodal models can see
+// pictures read via the read tool.
 func (a *Agent) messagesToOpenAI(sysPrompt string) []llm.DSMessage {
 	var out []llm.DSMessage
 	if sysPrompt != "" {
@@ -1716,9 +1732,9 @@ func (a *Agent) messagesToOpenAI(sysPrompt string) []llm.DSMessage {
 // to Responses-API input items. The system prompt goes into `instructions`
 // (handled by the caller); user text becomes message items, tool results
 // become function_call_output items, and assistant replies become message
-// items (output_text blocks) followed by function_call items. DeepSeek's
-// Responses API accepts no image input, so image blocks are dropped (the
-// server would replace them with placeholder text anyway).
+// items (output_text blocks) followed by function_call items. Image blocks
+// become input_image content parts — with the official vision model
+// (deepseek-v4-flash-vision-exp) the server processes them as real images.
 func (a *Agent) messagesToResponses() []llm.RSInputItem {
 	var items []llm.RSInputItem
 	appendText := func(role, text string) {
@@ -1731,11 +1747,28 @@ func (a *Agent) messagesToResponses() []llm.RSInputItem {
 		switch m.Role {
 		case "user":
 			var text strings.Builder
+			var images []llm.RSInputImage
 			flush := func() {
-				if text.Len() > 0 {
-					appendText("user", text.String())
-					text.Reset()
+				if text.Len() == 0 && len(images) == 0 {
+					return
 				}
+				if len(images) == 0 {
+					appendText("user", text.String())
+				} else {
+					// Text + image(s) become content parts (input_text /
+					// input_image). Only deepseek-v4-flash-vision-exp
+					// processes input_image as a real image.
+					parts := make([]interface{}, 0, len(images)+1)
+					if text.Len() > 0 {
+						parts = append(parts, llm.RSContentBlock{Type: "input_text", Text: text.String()})
+					}
+					for _, img := range images {
+						parts = append(parts, img)
+					}
+					items = append(items, llm.RSInputItem{Type: "message", Role: "user", Content: parts})
+				}
+				text.Reset()
+				images = nil
 			}
 			for _, block := range contentBlocks(m.Content) {
 				switch b := block.(type) {
@@ -1747,18 +1780,37 @@ func (a *Agent) messagesToResponses() []llm.RSInputItem {
 						if s, ok := b["text"].(string); ok {
 							text.WriteString(s)
 						}
+					case "image":
+						if img := rsImagePart(b); img != nil {
+							images = append(images, *img)
+						}
 					case "tool_result":
 						flush()
 						id, _ := b["tool_use_id"].(string)
-						out := toolResultText(b)
+						textPart, imageParts := toolResultContentParts(b)
 						// The Responses API requires function_call_output
 						// items to carry `output`; a result with no readable
-						// text (empty bash output, or an image-only read
+						// content (empty bash output, or an image-only read
 						// restored from a session entry) must still include
 						// the field or the server 400s with "missing field
 						// `output`". RSInputItem.Output is omitempty, so an
 						// empty string would drop the key entirely.
-						if out == "" {
+						var out interface{}
+						switch {
+						case len(imageParts) > 0:
+							// Image results ride in output content parts so
+							// vision models actually see them.
+							parts := make([]interface{}, 0, len(imageParts)+1)
+							if textPart != "" {
+								parts = append(parts, llm.RSContentBlock{Type: "input_text", Text: textPart})
+							}
+							for _, img := range imageParts {
+								parts = append(parts, img)
+							}
+							out = parts
+						case textPart != "":
+							out = textPart
+						default:
 							out = "(tool produced no text output)"
 						}
 						if id == "" {
@@ -1845,28 +1897,61 @@ func (a *Agent) messagesToResponses() []llm.RSInputItem {
 	return items
 }
 
-// toolResultText extracts the plain-text portion of a tool_result block
-// (string content, or the text blocks of a content-block list).
-func toolResultText(block map[string]interface{}) string {
+// rsImagePart converts an Anthropic image content block (map with
+// "type":"image" and a base64 source) into an RSInputImage part, or nil when
+// the block isn't a usable image.
+func rsImagePart(block map[string]interface{}) *llm.RSInputImage {
+	if block["type"] != "image" {
+		return nil
+	}
+	src, _ := block["source"].(map[string]interface{})
+	if src == nil {
+		return nil
+	}
+	mime, _ := src["media_type"].(string)
+	data, _ := src["data"].(string)
+	if mime == "" || data == "" {
+		return nil
+	}
+	return &llm.RSInputImage{
+		Type:     "input_image",
+		ImageURL: "data:" + mime + ";base64," + data,
+	}
+}
+
+// toolResultContentParts splits a tool_result block into its plain-text
+// portion and any image parts (for the Responses API, images travel in
+// function_call_output output content parts so vision models see them).
+func toolResultContentParts(block map[string]interface{}) (string, []llm.RSInputImage) {
 	content, ok := block["content"]
 	if !ok {
-		return ""
+		return "", nil
 	}
 	switch c := content.(type) {
 	case string:
-		return c
+		return c, nil
 	case []interface{}:
-		var parts []string
+		var textParts []string
+		var images []llm.RSInputImage
 		for _, blk := range c {
-			if cb, ok := blk.(map[string]interface{}); ok && cb["type"] == "text" {
+			cb, ok := blk.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch cb["type"] {
+			case "text":
 				if s, ok := cb["text"].(string); ok {
-					parts = append(parts, s)
+					textParts = append(textParts, s)
+				}
+			case "image":
+				if img := rsImagePart(cb); img != nil {
+					images = append(images, *img)
 				}
 			}
 		}
-		return strings.Join(parts, "")
+		return strings.Join(textParts, ""), images
 	}
-	return ""
+	return "", nil
 }
 
 // contentBlocks normalizes message content into a []interface{} of blocks.
@@ -1916,133 +2001,12 @@ func responsesEffort(l ThinkingLevel) string {
 }
 
 // isMultimodalMain reports whether the ACTIVE main model can see images
-// directly (read tool returns base64 data URLs). Text models get the
-// vision-tool hint instead.
+// directly (read tool returns base64 data URLs).
 func (a *Agent) isMultimodalMain() bool {
 	if info := a.ModelInfo(); info != nil {
 		return info.Multimodal
 	}
 	return false
-}
-
-// runVision is the injected runner for the vision tool. It reads the image
-// file, sends it to the configured multimodal model (default mimo-v2.5 on
-// opencode-go) with an optional prompt, streams the vision sub-agent's
-// reasoning + answer to stderr in real time, and returns the text answer
-// for the main agent to continue from.
-func (a *Agent) runVision(ctx context.Context, path, prompt string) (string, error) {
-	// Read + validate the image.
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	mime := tools.ImageMime(path)
-	if mime == "" {
-		return "", fmt.Errorf("%s is not an image (png/jpg/jpeg/gif/webp/bmp)", path)
-	}
-	if len(data) > tools.MaxImageBytes {
-		return "", fmt.Errorf("image too large: %d bytes (max %d)", len(data), tools.MaxImageBytes)
-	}
-
-	// Resolve vision model config: OPENCODE_API_KEY (+ optional
-	// PIGO_VISION_MODEL / PIGO_VISION_BASE_URL), falling back to the active
-	// provider's key and the current model.
-	key := os.Getenv("OPENCODE_API_KEY")
-	if key == "" {
-		key = a.cfg.APIKey
-	}
-	if key == "" {
-		return "", fmt.Errorf("vision model not configured: set OPENCODE_API_KEY (see /login opencode-go, then /reload)")
-	}
-	model := os.Getenv("PIGO_VISION_MODEL")
-	if model == "" {
-		model = a.cfg.VisionModel
-	}
-	if model == "" {
-		model = "mimo-v2.5"
-	}
-	base := os.Getenv("PIGO_VISION_BASE_URL")
-	if base == "" {
-		base = "https://opencode.ai/zen/go"
-	}
-
-	if prompt == "" {
-		prompt = "Describe this image in detail, including any text, UI elements, layout, colors, and notable details."
-	}
-
-	// Build the OpenAI-compatible vision request (image_url content block).
-	userContent := []interface{}{
-		map[string]interface{}{
-			"type": "image_url",
-			"image_url": map[string]interface{}{
-				"url": "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data),
-			},
-		},
-		map[string]interface{}{"type": "text", "text": prompt},
-	}
-	req := &llm.DSRequest{
-		Model: model,
-		Messages: []llm.DSMessage{
-			{Role: "system", Content: "You are a vision assistant. Analyze the image and return a concise, accurate description in the same language the user's question uses."},
-			{Role: "user", Content: userContent},
-		},
-		MaxTokens: 2048,
-	}
-
-	// Inherit the agent's run context so ESC/Ctrl+C cancels a slow vision
-	// call (like bash); a 120s wall clock bounds it otherwise.
-	callCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
-
-	// Stream the vision sub-agent's output to stderr live: reasoning first,
-	// then the answer — the user sees exactly what the vision model produces.
-	sep := strings.Repeat("─", 40)
-	fmt.Fprintf(os.Stderr, "%s👁 视觉子agent%s%s · %s%s · %s\n",
-		ANSICyan, ANSIReset, ANSIGray, filepath.Base(path), ANSIReset, model)
-	fmt.Fprintf(os.Stderr, "%s%s%s\n", ANSIGray, sep, ANSIReset)
-
-	thinking := false
-	contentStarted := false
-	var content, reasoning strings.Builder
-	client := llm.NewDeepSeekClient(key, base)
-	_, err = client.SendStreamWithContext(callCtx, req,
-		func(r string) {
-			reasoning.WriteString(r)
-			if !thinking {
-				thinking = true
-				fmt.Fprintf(os.Stderr, "%s💭 视觉推理%s\n", ANSIYellow, ANSIReset)
-				fmt.Fprint(os.Stderr, ANSIThinking)
-			}
-			fmt.Fprint(os.Stderr, r)
-		},
-		func(c string) {
-			content.WriteString(c)
-			if !contentStarted {
-				contentStarted = true
-				if thinking {
-					fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
-				}
-				fmt.Fprintf(os.Stderr, "%s💡 视觉回答%s\n", ANSIGreen, ANSIReset)
-			}
-			fmt.Fprint(os.Stderr, c)
-		},
-	)
-	if thinking && !contentStarted {
-		fmt.Fprintf(os.Stderr, "%s\n", ANSIReset)
-	}
-	fmt.Fprintln(os.Stderr)
-	if err != nil {
-		return "", fmt.Errorf("vision API: %w", err)
-	}
-
-	out := strings.TrimSpace(content.String())
-	if out == "" {
-		out = strings.TrimSpace(reasoning.String())
-	}
-	if out == "" {
-		return "", fmt.Errorf("vision model returned an empty response")
-	}
-	return out, nil
 }
 
 func (a *Agent) SelfIterate(ctx context.Context) error {
@@ -2159,8 +2123,6 @@ func (a *Agent) Reload() (string, error) {
 	a.registry.Register(&tools.LsTool{})
 	a.registry.Register(&tools.GrepTool{})
 	a.registry.Register(&tools.FindTool{})
-	// Re-wire the vision sub-agent tool (runner reads live env vars).
-	a.registry.Register(&tools.VisionTool{Runner: a.runVision})
 	a.applyToolFilter(a.cfg.Tools, a.cfg.ExcludeTools, a.cfg.NoTools)
 	reloaded = append(reloaded, "tools")
 
@@ -2322,7 +2284,7 @@ func loadContextFiles(home string) string {
 	}
 
 	if len(parts) == 0 {
-		return "You are PiGo — a coding agent in Go.\nTools: read, write, edit, bash, grep, find, ls, vision.\nBe concise. Use edit for changes. Use the `vision` tool to analyze image files.\n\n## Docs\nCheck `docs/` for pi design reference & feature specs.\n"
+		return "You are PiGo — a coding agent in Go.\nTools: read, write, edit, bash, grep, find, ls.\nBe concise. Use edit, not write, for changes. Multimodal main models see image files directly via `read` (returned as data URLs).\n\n## Docs\nCheck `docs/` for pi design reference & feature specs.\n"
 	}
 
 	return strings.Join(parts, "\n\n")
@@ -2576,9 +2538,6 @@ func toolArgPreview(tu llm.ContentBlock) string {
 		if path == "" || path == "." {
 			return "."
 		}
-		return filepath.Base(path)
-	case "vision":
-		path, _ := tu.Input["path"].(string)
 		return filepath.Base(path)
 	}
 	return ""

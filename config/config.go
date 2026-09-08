@@ -27,9 +27,6 @@ type Config struct {
 	Continue       bool   // continue latest session
 	AutoRepair     bool   // auto-trigger repair on error without asking
 	Print          bool   // -p/--print: non-interactive, print response and exit
-	// VisionModel is the vision sub-agent model used by the `vision` tool
-	// (default: mimo-v2.5 on opencode-go). Auth comes from OPENCODE_API_KEY.
-	VisionModel string
 	// Tools / ExcludeTools / NoTools — tool filtering flags (pi parity):
 	// --tools read,write   only these tools are available
 	// --exclude-tools bash disable specific tools
@@ -65,22 +62,19 @@ You are PiGo — a coding agent in Go. Work like a focused senior engineer:
 
 | 工具 | 用途 |
 |---|---|
-| read | 读文本文件（支持 offset/limit）；图片文件按主模型能力返回 data URL 或 vision 提示 |
+| read | 读文本文件（支持 offset/limit）；图片文件按主模型能力返回 data URL 或文件元信息 |
 | write | 新建/整体覆盖文件（小文件或模板） |
 | edit | 对现有文件做精确文本替换（首选修改手段） |
 | bash | 执行命令：build、test、git、安装依赖等 |
 | grep | 按正则搜代码（优先于 bash grep） |
 | find | 按文件名 glob 找文件 |
 | ls | 列目录 |
-| vision | 分析图片：截图、架构图、UI 稿、图表 |
 
 ## 图片 / Vision
 
-你不能直接看到图片（除非主模型是多模态）。需要理解图片内容时，
-调用 vision 工具：传图片路径和可选问题，视觉子模型（默认
-mimo-v2.5）返回文字描述，你再基于描述继续工作。
-
-示例：vision {path: "docs/architecture.png", prompt: "描述这个架构并指出问题"}
+多模态主模型（如 deepseek-v4-flash-vision-exp）直接看图：read 图片文件
+返回 base64 data URL，图片进入多模态消息内容块。纯文本主模型只拿到
+文件元信息 —— 需要分析图片时切换到官方视觉模型即可，无需第三方工具。
 
 ## 工程规范
 
@@ -104,7 +98,7 @@ test: 测试
 
 ## 交互约定
 
-- 用户输入 @file 或 @图片 时，优先用 read/vision 读取内容再回答
+- 用户输入 @file 或 @图片 时，优先用 read 读取内容再回答（多模态主模型直接看 data URL）
 - 用户要求"总结""解释""列出"时，直接输出，无需调用工具
 - 用户给的指令不明确时，先确认再执行大改动
 `
@@ -161,8 +155,8 @@ func EnvKeyFor(providerID string) string {
 
 func Load() *Config {
 	// 0. Ensure ~/.pigo exists with a starter AGENTS.md on first run, so
-	//    the user always has a system/agent prompt doc to customize and the
-	//    vision tool is documented. Never overwrites an existing file.
+	//    the user always has a system/agent prompt doc to customize.
+	//    Never overwrites an existing file.
 	home, _ := os.UserHomeDir()
 	ensureGlobalContext()
 
@@ -183,7 +177,6 @@ func Load() *Config {
 		WorkDir:       getEnv("PIGO_WORKDIR", ""),
 		MaxTurns:      getEnvInt("PIGO_MAX_TURNS", 50),
 		AutoRepair:    getEnvBool("PIGO_AUTOREPAIR"),
-		VisionModel:   getEnv("PIGO_VISION_MODEL", ""),
 	}
 }
 

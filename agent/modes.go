@@ -85,10 +85,10 @@ func BuildSystemPromptWithDir(mode Mode, contextInfo, workDir string) string {
 
 	default:
 		sb.WriteString("You are PiGo — a coding agent in Go.\n")
-		sb.WriteString("Tools: read, write, edit, bash, grep, find, ls, vision.\n")
+		sb.WriteString("Tools: read, write, edit, bash, grep, find, ls.\n")
 		sb.WriteString("Be concise. Use edit, not write, for changes.\n\n")
 		sb.WriteString("## Images\n")
-		sb.WriteString("You cannot see images directly. To analyze a screenshot, diagram, UI mockup, or any image file, use the `vision` tool: pass the image path and an optional question. The vision model returns a text description you can act on.\n\n")
+		sb.WriteString("Multimodal main models see image files directly: `read` returns them as base64 data URLs you can view. For text-only models `read` returns file metadata instead — switch to a vision-capable model (e.g. deepseek-v4-flash-vision-exp) to analyze images.\n\n")
 		sb.WriteString("## Rules\n")
 		sb.WriteString("- Read files ONLY once per turn — don't re-read unchanged files\n")
 		sb.WriteString("- After understanding the code, IMMEDIATELY propose and make edits\n")

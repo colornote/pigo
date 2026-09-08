@@ -95,8 +95,21 @@ func TestMessagesToResponsesToolResultBlocks(t *testing.T) {
 		t.Fatalf("expected 1 item, got %#v", items)
 	}
 	it := items[0]
-	if it.Type != "function_call_output" || it.Output != "stdout line" {
-		t.Errorf("expected text-only output, got %#v", it)
+	if it.Type != "function_call_output" || it.CallID != "t1" {
+		t.Fatalf("expected function_call_output(t1), got %#v", it)
+	}
+	// Text + image collapse into output content parts: the vision model
+	// (deepseek-v4-flash-vision-exp) sees the input_image part, the text
+	// rides along as input_text.
+	parts, ok := it.Output.([]interface{})
+	if !ok || len(parts) != 2 {
+		t.Fatalf("expected 2 output parts, got %#v", it.Output)
+	}
+	if tc, ok := parts[0].(llm.RSContentBlock); !ok || tc.Type != "input_text" || tc.Text != "stdout line" {
+		t.Errorf("expected input_text part, got %#v", parts[0])
+	}
+	if img, ok := parts[1].(llm.RSInputImage); !ok || img.Type != "input_image" || img.ImageURL != "data:image/png;base64,x" {
+		t.Errorf("expected input_image part, got %#v", parts[1])
 	}
 }
 

@@ -54,24 +54,21 @@ func (r *Registry) List() []Tool {
 
 // ─── ReadTool ────────────────────────────────────────────────────
 
-// Image-mode constants control how ReadTool returns image files.
+// ImageMode controls how ReadTool returns image files.
 const (
 	// ImageModeDataURL returns the image as a base64 data URL so multimodal
-	// main models (e.g. opencode-go mimo-v2.5) can see it directly.
+	// main models (e.g. deepseek-v4-flash-vision-exp) can see it directly.
 	ImageModeDataURL = "dataurl"
-	// ImageModeHint returns a short pointer to the vision tool — for text
-	// main models, a raw base64 blob would be unreadable token garbage.
-	ImageModeHint = "hint"
 )
 
-// MaxImageBytes is the size cap for images returned by read / sent to the
-// vision tool (5MB) — keeps base64 blobs from blowing up the context window.
+// MaxImageBytes is the size cap for images returned by read as data URLs
+// (5MB) — keeps base64 blobs from blowing up the context window.
 const MaxImageBytes = 5 * 1024 * 1024
 
 type ReadTool struct {
 	// ImageMode controls how image files are returned:
 	// ImageModeDataURL → base64 data URL (multimodal models);
-	// ImageModeHint → short pointer to the vision tool (default for text models).
+	// empty → file metadata only (text models can't read image blobs).
 	ImageMode string
 }
 
@@ -109,10 +106,10 @@ func (t *ReadTool) Execute(input map[string]interface{}) *Result {
 			// base64 data URL — multimodal main models see the picture.
 			return &Result{Success: true, Output: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)}
 		}
-		// Hint mode (default): text models can't read base64; point at the
-		// vision tool instead of wasting tokens on unreadable blob.
+		// Text-model mode (default): a raw base64 blob would be unreadable
+		// token garbage, so return lightweight metadata only.
 		return &Result{Success: true, Output: fmt.Sprintf(
-			"[Image: %s (%s, %s) — this model cannot see images; use the vision tool to analyze it]",
+			"[Image file: %s (%s, %s)]",
 			path, mime, formatSize(len(data)))}
 	}
 
@@ -760,63 +757,4 @@ func (t *LsTool) Execute(input map[string]interface{}) *Result {
 		result = "(empty directory)"
 	}
 	return &Result{Success: true, Output: result}
-}
-
-// ─── VisionTool (vision sub-agent) ─────────────────────────────
-
-// VisionTool analyzes an image with a multimodal vision model and returns a
-// text description to the main agent. It acts as a sub-agent bridge: the
-// main model (e.g. deepseek, text-only) passes a local image path and an
-// optional question; the tool sends the image to the vision model
-// (mimo-v2.5 on opencode-go by default) and returns its answer as text the
-// main agent can act on.
-//
-// The actual LLM call lives outside this package (injected via Runner by
-// agent.New) so tools stays free of llm imports. A nil Runner means the
-// vision model isn't configured — the tool reports that clearly.
-type VisionTool struct {
-	// Runner executes the vision request and returns the model's text
-	// answer. Set by agent.New; nil → "vision model not configured".
-	Runner func(ctx context.Context, path, prompt string) (string, error)
-	// Ctx is the agent's run context (set per-tool-call by the agent loop)
-	// so ESC/Ctrl+C cancels a slow vision request, like bash.
-	Ctx context.Context
-}
-
-func (t *VisionTool) Name() string { return "vision" }
-func (t *VisionTool) Description() string {
-	return "Analyze an image using the vision model (mimo-v2.5). " +
-		"Use for screenshots, diagrams, UI mockups, charts, or any image file. " +
-		"Returns a text description of the image that you can act on."
-}
-
-func (t *VisionTool) Schema() map[string]interface{} {
-	return map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path":   map[string]interface{}{"type": "string", "description": "Image file path (png/jpg/jpeg/gif/webp/bmp)"},
-			"prompt": map[string]interface{}{"type": "string", "description": "Optional question about the image (default: describe it)"},
-		},
-		"required": []string{"path"},
-	}
-}
-
-func (t *VisionTool) Execute(input map[string]interface{}) *Result {
-	path, _ := input["path"].(string)
-	if path == "" {
-		return &Result{Error: "path required"}
-	}
-	prompt, _ := input["prompt"].(string)
-	if t.Runner == nil {
-		return &Result{Error: "vision model not configured — set OPENCODE_API_KEY (see /login opencode-go, /reload)"}
-	}
-	ctx := t.Ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	out, err := t.Runner(ctx, path, prompt)
-	if err != nil {
-		return &Result{Success: false, Error: err.Error()}
-	}
-	return &Result{Success: true, Output: out}
 }
