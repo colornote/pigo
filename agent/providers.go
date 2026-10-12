@@ -103,6 +103,15 @@ var DeepSeekProvider = Provider{
 			Reasoning: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
 			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.014},
 		},
+		// deepseek-flash — current official flagship (DeepSeek-V4.1-Flash):
+		// multimodal (input_modalities text+image) with 1M context. Replaces
+		// the retired deepseek-v4-flash id. Registered as Multimodal so read
+		// returns base64 data URLs the model can see directly.
+		"deepseek-flash": {
+			ID: "deepseek-flash", Name: "V4.1 Flash", Description: "最新 · 视觉输入",
+			Reasoning: true, Multimodal: true, ContextWindow: 1_048_576, MaxTokens: 393_216,
+			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.014},
+		},
 		// deepseek-v4-flash-vision-exp — official experimental vision model:
 		// accepts image input (JPEG/PNG/GIF/WebP) alongside text. Registered
 		// as multimodal so read returns base64 data URLs the model can see.
@@ -149,6 +158,13 @@ var DeepSeekResponsesProvider = Provider{
 		"deepseek-v4-flash": {
 			ID: "deepseek-v4-flash", Name: "V4 Flash", Description: "快速 · Responses API",
 			Reasoning: true, ContextWindow: 1_000_000, MaxTokens: 384_000,
+			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.014},
+		},
+		// deepseek-flash — current official flagship (DeepSeek-V4.1-Flash):
+		// multimodal (text+image), 1M context. Replaces deepseek-v4-flash.
+		"deepseek-flash": {
+			ID: "deepseek-flash", Name: "V4.1 Flash", Description: "最新 · 视觉输入 · Responses API",
+			Reasoning: true, Multimodal: true, ContextWindow: 1_048_576, MaxTokens: 393_216,
 			Pricing: llm.ModelPricing{InputPrice: 0.14, OutputPrice: 0.28, CacheHit: 0.014},
 		},
 		"deepseek-v4-pro": {
