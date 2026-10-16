@@ -529,12 +529,10 @@ func runShellCommand(command string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	go func() {
 		<-ctx.Done()
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		killProcessGroup(cmd)
 	}()
 
 	output, err := cmd.CombinedOutput()
