@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -490,14 +489,12 @@ func (t *BashTool) Execute(input map[string]interface{}) *Result {
 	// entire tree (bash + grandchildren). Without this, orphaned children
 	// inherit the stdout pipe and cmd.Wait() blocks until they exit —
 	// hanging the agent for minutes (e.g. `bash -c "echo hi; sleep 30"`).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	// Kill the whole process group when the context fires (timeout/cancel).
 	// Go's CommandContext only SIGKILLs the direct child.
 	go func() {
 		<-ctx.Done()
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		killProcessGroup(cmd)
 	}()
 
 	// Live countdown: after a short grace period, show the remaining seconds
