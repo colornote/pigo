@@ -39,6 +39,31 @@ type Agent struct {
 	noTools     bool            // all tools disabled
 	toolInclude map[string]bool // --tools allowlist (nil = all)
 	toolExclude map[string]bool // --exclude-tools denylist
+	// Responses-API server-side conversation state (store +
+	// previous_response_id). Only engaged after the server confirms it
+	// stored a response (respStoreOK); a provider that ignores `store`
+	// (DeepSeek) leaves this off, so behavior stays "send full history".
+	respStoreOK bool   // server confirmed it persisted a response
+	respLastID  string // id of the last stored response (chain head)
+	respSentLen int    // len(a.messages) already covered by the stored chain
+}
+
+// respStoreEnabled reports whether Responses-API server-side state may be
+// used at all. On by default; set PIGO_RESP_STORE=0 to always send the full
+// history. Even when enabled, chaining only starts once the server echoes
+// response.store == true.
+func (a *Agent) respStoreEnabled() bool {
+	return os.Getenv("PIGO_RESP_STORE") != "0"
+}
+
+// resetResponsesChain drops any server-side conversation state so the next
+// Responses-API request re-sends the full history. Call it after anything
+// that rewrites a.messages (compaction, provider/model switch) or after a
+// failed chained request (the stored id may have expired).
+func (a *Agent) resetResponsesChain() {
+	a.respStoreOK = false
+	a.respLastID = ""
+	a.respSentLen = 0
 }
 
 func New(cfg *config.Config) *Agent {
@@ -135,6 +160,7 @@ func (a *Agent) SwitchModel(name string) bool {
 	a.client = llm.New(a.cfg.APIKey, a.baseURL, normalized)
 	a.client.TotalUsage = llm.Usage{}
 	a.deepseekClient.TotalUsage = llm.Usage{}
+	a.resetResponsesChain() // stored response belongs to the previous model
 	return true
 }
 
@@ -173,6 +199,7 @@ func (a *Agent) SwitchProvider(id string) bool {
 	a.deepseekClient = llm.NewDeepSeekClient(a.cfg.APIKey, a.dsBaseURL)
 	a.client.TotalUsage = llm.Usage{}
 	a.deepseekClient.TotalUsage = llm.Usage{}
+	a.resetResponsesChain() // stored response belongs to the previous provider
 	return true
 }
 
@@ -663,6 +690,8 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		var resp *llm.Response
 		var apiErr error
 		var reasoningText string
+		var respRS *llm.RSResponse // responses protocol: terminal response object
+		var rsUseChain bool        // this turn chained onto a stored response
 		switch protocol {
 		case "responses":
 			// DeepSeek Responses API (/v1/responses, Codex-compatible):
@@ -670,12 +699,34 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 			// tools use {"type":"function",...}, model answers with
 			// function_call items. Reasoning arrives via
 			// response.reasoning_text.delta events.
+			//
+			// Server-side chaining: request store=true so the server keeps the
+			// response; once it confirms (response.store), the next turn sends
+			// only the new items via previous_response_id instead of the whole
+			// history. A provider that silently ignores store (DeepSeek) never
+			// confirms, so rsUseChain stays false and the full history is sent
+			// — identical to the previous behavior.
+			var rsInput interface{}
+			rsUseChain = a.respStoreEnabled() && a.respStoreOK && a.respLastID != "" &&
+				a.respSentLen <= len(a.messages)
+			if rsUseChain {
+				rsInput = a.responsesItems(a.respSentLen, true)
+			} else {
+				rsInput = a.responsesItems(0, false)
+			}
 			rsReq := &llm.RSRequest{
 				Model:           a.cfg.Model,
 				Instructions:    sysPrompt,
-				Input:           a.messagesToResponses(),
+				Input:           rsInput,
 				MaxOutputTokens: maxTok,
 				Tools:           a.buildResponsesToolDefs(),
+			}
+			if a.respStoreEnabled() {
+				storeOn := true
+				rsReq.Store = &storeOn
+			}
+			if rsUseChain {
+				rsReq.PreviousResponseID = a.respLastID
 			}
 			// Map the active thinking level to the Responses-API
 			// reasoning.effort (none/low/medium/high). ThinkOff leaves the
@@ -693,6 +744,7 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 			}
 			text, reasoning, calls, finalResp, err := a.deepseekClient.SendResponsesStream(ctx, rsReq, onThinking, onText)
 			apiErr = err
+			respRS = finalResp
 			if reasoning != "" {
 				reasoningText = reasoning
 			} else if finalResp != nil {
@@ -773,6 +825,11 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		}
 
 		if apiErr != nil {
+			// A failed chained request may mean the stored response expired
+			// or was rejected — drop the chain so the retry sends full history.
+			if rsUseChain {
+				a.resetResponsesChain()
+			}
 			return "", fmt.Errorf("API: %w", apiErr)
 		}
 		if resp == nil {
@@ -815,6 +872,21 @@ func (a *Agent) runStandardLoop(ctx context.Context) (string, error) {
 		}
 
 		a.messages = append(a.messages, llm.Message{Role: "assistant", Content: assistantContent})
+
+		// Responses-API chaining bookkeeping: only keep the chain if the
+		// server confirmed it stored this response; otherwise reset so the
+		// next turn sends the full history. respSentLen marks everything now
+		// covered by the stored chain (up to and including this assistant
+		// turn); the next turn's increment is a.messages[respSentLen:].
+		if protocol == "responses" && a.respStoreEnabled() {
+			if respRS != nil && respRS.Store && respRS.ID != "" {
+				a.respStoreOK = true
+				a.respLastID = respRS.ID
+				a.respSentLen = len(a.messages)
+			} else {
+				a.resetResponsesChain()
+			}
+		}
 
 		// Persist full structured content (text + tool_use blocks) as JSON
 		// so tool_use_id references survive session resume.
@@ -1026,6 +1098,11 @@ func (a *Agent) SaveSession(name string) error {
 // is recorded as a "compaction" session entry so it survives resume.
 func (a *Agent) Compact(ctx context.Context, customInstr string) error {
 	const keep = 8 // recent messages retained verbatim
+
+	// Compaction rewrites a.messages, invalidating any server-side chain
+	// (the stored response no longer matches the history). Reset up front so
+	// even a failed compaction leaves us on the safe full-resend path.
+	a.resetResponsesChain()
 
 	if len(a.messages) <= keep+2 {
 		return fmt.Errorf("conversation too short to compact (need more than %d messages, have %d)", keep+2, len(a.messages))
@@ -1736,6 +1813,20 @@ func (a *Agent) messagesToOpenAI(sysPrompt string) []llm.DSMessage {
 // become input_image content parts — with the official vision model
 // (deepseek-v4-flash-vision-exp) the server processes them as real images.
 func (a *Agent) messagesToResponses() []llm.RSInputItem {
+	return a.responsesItems(0, false)
+}
+
+// responsesItems is messagesToResponses with two knobs used by server-side
+// chaining: `start` skips the already-stored prefix of a.messages, and
+// `skipAssistant` drops assistant turns — their content lives in the stored
+// response the chain is built on, so re-sending them would duplicate it.
+func (a *Agent) responsesItems(start int, skipAssistant bool) []llm.RSInputItem {
+	if start < 0 {
+		start = 0
+	}
+	if start > len(a.messages) {
+		start = len(a.messages)
+	}
 	var items []llm.RSInputItem
 	appendText := func(role, text string) {
 		if text == "" {
@@ -1743,7 +1834,7 @@ func (a *Agent) messagesToResponses() []llm.RSInputItem {
 		}
 		items = append(items, llm.RSInputItem{Type: "message", Role: role, Content: text})
 	}
-	for _, m := range a.messages {
+	for _, m := range a.messages[start:] {
 		switch m.Role {
 		case "user":
 			var text strings.Builder
@@ -1830,6 +1921,11 @@ func (a *Agent) messagesToResponses() []llm.RSInputItem {
 			}
 			flush()
 		case "assistant":
+			// When chaining, this assistant turn is already part of the
+			// stored response — skip it to avoid duplicating the output.
+			if skipAssistant {
+				continue
+			}
 			var blocks []llm.RSContentBlock
 			flushBlocks := func() {
 				if len(blocks) > 0 {

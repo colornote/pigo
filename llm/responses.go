@@ -84,6 +84,15 @@ type RSRequest struct {
 	Reasoning       *RSReasoning `json:"reasoning,omitempty"`
 	Text            *RSText      `json:"text,omitempty"`
 	User            string       `json:"user,omitempty"`
+	// Store asks the server to persist this response so a later request can
+	// chain onto it via PreviousResponseID and send only the new input items
+	// instead of the whole history. Servers that don't support it ignore the
+	// field (DeepSeek does) — hence the response.store confirmation check
+	// before chaining.
+	Store *bool `json:"store,omitempty"`
+	// PreviousResponseID chains onto a stored response ("resp_…"), so the
+	// model sees that response's full input+output plus this request's Input.
+	PreviousResponseID string `json:"previous_response_id,omitempty"`
 }
 
 // RSOutputItem is one item in the response `output` array (or in a
@@ -133,6 +142,11 @@ type RSResponse struct {
 	Output    []RSOutputItem `json:"output"`
 	Usage     *RSUsage       `json:"usage,omitempty"`
 	Error     *RSError       `json:"error,omitempty"`
+	// Store mirrors the request flag: true only when the server actually
+	// persisted this response (so it can be chained). DeepSeek always
+	// reports false, which disables chaining for that provider.
+	Store              bool   `json:"store"`
+	PreviousResponseID string `json:"previous_response_id,omitempty"`
 }
 
 // RSToolCall is a finished function call assembled from a stream.

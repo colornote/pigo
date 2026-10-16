@@ -207,6 +207,64 @@ func TestMessagesToResponsesReasoning(t *testing.T) {
 	}
 }
 
+// TestResponsesItemsIncrement verifies the server-side chaining view of the
+// history: responsesItems(start, skipAssistant) sends only the tail beyond
+// `start` and drops assistant turns (their content already lives in the
+// stored response), while the full view still includes everything.
+func TestResponsesItemsIncrement(t *testing.T) {
+	a := &Agent{}
+	a.messages = []llm.Message{
+		{Role: "user", Content: []llm.TextContent{{Type: "text", Text: "list files"}}},
+		{Role: "assistant", Content: []interface{}{
+			llm.ToolUseContent{Type: "tool_use", ID: "call_1", Name: "bash", Input: map[string]interface{}{"cmd": "ls"}},
+		}},
+		{Role: "user", Content: []interface{}{
+			map[string]interface{}{"type": "tool_result", "tool_use_id": "call_1", "content": "file.txt"},
+		}},
+	}
+
+	// Full view: message, function_call, function_call_output.
+	var fullKinds []string
+	for _, it := range a.responsesItems(0, false) {
+		fullKinds = append(fullKinds, it.Type)
+	}
+	if got := strings.Join(fullKinds, ","); got != "message,function_call,function_call_output" {
+		t.Fatalf("full kinds: got %v", fullKinds)
+	}
+
+	// Increment from index 1 (the assistant turn), skipping assistant turns:
+	// only the tool result survives.
+	inc := a.responsesItems(1, true)
+	if len(inc) != 1 || inc[0].Type != "function_call_output" || inc[0].CallID != "call_1" {
+		t.Fatalf("increment items: got %#v", inc)
+	}
+
+	// Out-of-range start clamps to the end (empty increment).
+	if got := a.responsesItems(99, true); len(got) != 0 {
+		t.Errorf("clamped start should yield no items, got %#v", got)
+	}
+}
+
+// TestResponsesChainResetAndKillSwitch covers the PIGO_RESP_STORE kill switch
+// and that resetResponsesChain clears the stored-chain bookkeeping.
+func TestResponsesChainResetAndKillSwitch(t *testing.T) {
+	a := &Agent{}
+	a.respStoreOK, a.respLastID, a.respSentLen = true, "resp_x", 5
+
+	if !a.respStoreEnabled() {
+		t.Error("server-side chaining should be enabled by default")
+	}
+	t.Setenv("PIGO_RESP_STORE", "0")
+	if a.respStoreEnabled() {
+		t.Error("PIGO_RESP_STORE=0 must disable chaining")
+	}
+
+	a.resetResponsesChain()
+	if a.respStoreOK || a.respLastID != "" || a.respSentLen != 0 {
+		t.Errorf("reset left state behind: ok=%v id=%q len=%d", a.respStoreOK, a.respLastID, a.respSentLen)
+	}
+}
+
 // TestProtocolResolution verifies the protocol switch covers responses.
 func TestProtocolResolution(t *testing.T) {
 	a := New(newTestConfig(t.TempDir(), ""))

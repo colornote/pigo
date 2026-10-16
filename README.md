@@ -168,6 +168,12 @@ Text-only main models get lightweight file metadata from `read` — switch the m
 PIGO_PROVIDER=deepseek-responses pigo "DeepSeek 官方最近发布了哪些新模型？"
 ```
 
+### Server-side conversation state (Responses API)
+
+For the `responses` protocol pigo sends `store: true`; once the server confirms it persisted a response (`response.store`), the next turn chains onto it with `previous_response_id` and uploads only the new items instead of the whole history. Force it off with `PIGO_RESP_STORE=0`.
+
+> ⚠️ DeepSeek's `/v1/responses` currently **ignores `store`** (it echoes `store: false` and accepts a bogus `previous_response_id` without error), so on `deepseek-responses` this feature stays dormant and pigo keeps sending the full history — same as before. It activates automatically on backends that truly implement server-side state (e.g. OpenAI).
+
 Switch at runtime with `/model <name>`; list with `/models`. Only models flagged 🧠 (native `reasoning_content` CoT) use the native CoT path — everything else uses the Anthropic-compatible tool-calling loop.
 
 ---
