@@ -20,8 +20,6 @@ import (
 
 	"github.com/peterh/liner"
 	"golang.org/x/term"
-
-	"golang.org/x/sys/unix"
 )
 
 var ag *agent.Agent
@@ -747,11 +745,7 @@ func makeRawInputOnly(fd int) (*term.State, error) {
 	}
 	// Re-enable output post-processing: \n → \r\n
 	// Also preserve IUTF8 for multi-byte character backspace
-	if tios, err := unix.IoctlGetTermios(fd, termiosGet); err == nil {
-		tios.Oflag |= unix.OPOST | unix.ONLCR
-		tios.Iflag |= iutf8Flag
-		unix.IoctlSetTermios(fd, termiosSet, tios)
-	}
+	restoreOutputFlags(fd)
 	return oldState, nil
 }
 
@@ -767,11 +761,7 @@ func stdinDrain(reader *bufio.Reader) {
 	buf := make([]byte, 4096)
 	deadline := time.Now().Add(250 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		var rset unix.FdSet
-		rset.Set(fd)
-		tv := unix.Timeval{Sec: 0, Usec: 30000}
-		n, _ := unix.Select(fd+1, &rset, nil, nil, &tv)
-		if n <= 0 {
+		if stdinReadable(fd, 30000) <= 0 {
 			return
 		}
 		os.Stdin.Read(buf)
@@ -792,14 +782,10 @@ func startESCListener(cancel context.CancelFunc) {
 		// SetReadDeadline is a no-op on ttys (only sockets/pipes support it) —
 		// a bare Read would block forever and leak this goroutine every run.
 		fd := int(os.Stdin.Fd())
-		var rset unix.FdSet
-		rset.Set(fd)
-		tv := unix.Timeval{Sec: 0, Usec: 100000}
-		n, err := unix.Select(fd+1, &rset, nil, nil, &tv)
-		if err != nil || n == 0 {
-			continue // timeout or error — loop back to check escDone
+		if stdinReadable(fd, 100000) == 0 {
+			continue // timeout — loop back to check escDone
 		}
-		n, err = os.Stdin.Read(buf[:])
+		n, err := os.Stdin.Read(buf[:])
 		if err != nil || n == 0 {
 			continue
 		}
@@ -1296,11 +1282,7 @@ func readKey(timeout time.Duration) string {
 	// Wait for input with a real timeout via select(). SetReadDeadline is a
 	// no-op on ttys (only sockets/pipes support it) — a bare Read blocks
 	// forever, hanging the process at the repair prompt.
-	var rset unix.FdSet
-	rset.Set(fd)
-	tv := unix.NsecToTimeval(timeout.Nanoseconds())
-	n, err := unix.Select(fd+1, &rset, nil, nil, &tv)
-	if err != nil || n == 0 {
+	if stdinReadable(fd, int(timeout/time.Microsecond)) == 0 {
 		return "continue"
 	}
 	var buf [1]byte
