@@ -14,7 +14,7 @@ PREFIX  ?= /usr/local
 .PHONY: build install install-local test clean
 
 build:
-	go build -o $(BINARY) .
+	go build -trimpath -o $(BINARY) .
 
 install: build
 	install -d $(DESTDIR)$(PREFIX)/bin

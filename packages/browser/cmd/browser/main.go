@@ -2,7 +2,7 @@
 
 // browser — a Chrome-browser-like CLI for coding agents, driven over CDP.
 //
-// Attaches to a persistent Chrome profile on localhost:9222 (agent-baseline
+// Attaches to a persistent Chrome profile on localhost:9222 (the agent baseline
 // baseline, AGENT.md §11.1.1) with zero third-party dependencies.
 //
 // Usage:
@@ -36,7 +36,7 @@ import (
 	"pigo/browser/internal/cdp"
 )
 
-const lockPath = "/tmp/cdp-agent.lock" // agent-baseline CDP serialization
+const lockPath = "/tmp/cdp-agent.lock" // shared CDP serialization
 
 func main() {
 	args := os.Args[1:]
@@ -111,7 +111,7 @@ Usage:
   browser lock -- <cmd...>              run cmd under the CDP flock
 
 <tab> is a 0-based index from `+"`browser tabs`"+`, or a URL/title substring.
-Env: CDP_PORT (default 9222). Lock: `+lockPath+` (agent-baseline convention).
+Env: CDP_PORT (default 9222). Lock: `+lockPath+` (shared convention).
 `)
 }
 
@@ -170,7 +170,7 @@ func doctor() error {
 	tabs, err := cdp.ListTabs(p)
 	if err != nil {
 		fmt.Printf("✗ Chrome CDP :%d NOT reachable — %v\n", p, err)
-		fmt.Println("\nStart Chrome with the persistent debug profile (agent-baseline AGENT.md §11.1.1):")
+		fmt.Println("\nStart Chrome with the persistent debug profile (shared Chrome baseline):")
 		fmt.Println("\n  lsof -ti :9222 | xargs -r kill -9 2>/dev/null")
 		fmt.Println(`  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \`)
 		fmt.Println("     --remote-debugging-port=9222 \\")
@@ -413,7 +413,7 @@ func waitMs(s string) error {
 	return nil
 }
 
-// lockRun runs a command under the CDP flock (agent-baseline §11.1.2):
+// lockRun runs a command under the CDP flock (CDP serialization convention):
 // serialize access to the shared Chrome profile across agents.
 func lockRun(args []string) error {
 	// Accept both `lock -- cmd...` and `lock cmd...`.

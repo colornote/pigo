@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// DefaultPort matches the agent-baseline Chrome baseline (AGENT.md §11.1.1).
+// DefaultPort matches the shared Chrome baseline (AGENT.md §11.1.1).
 const DefaultPort = 9222
 
 // Tab is a Chrome tab as reported by /json/list.

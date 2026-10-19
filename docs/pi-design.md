@@ -108,7 +108,7 @@ pigo/
 ## Notes
 - **`packages/browser/`** — standalone pi-style package (independent of PiGo
   core): zero-dependency Go CDP Chrome automation CLI (`open/tabs/eval/click/
-  type/text/scroll/shot/close/lock`). Follows the agent-baseline Chrome baseline
+  type/text/scroll/shot/close/lock`). Follows the shared Chrome baseline
   (`:9222`, `~/.chrome-cdp-profile`, `--remote-allow-origins=*`,
   `/tmp/cdp-agent.lock`). See `packages/browser/README.md` + `SKILL.md`.
 - Inline CoT tag parsing (`llm/deepseek.go`): fixed a bug where an empty opening-tag

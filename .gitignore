@@ -1,9 +1,12 @@
 # Binary
 pigo
 
-# Remote-build artifacts (build-host cross-compile backups / temp)
+# Build artifacts
 pigo.bak-*
 .pigo.new
+
+# Prebuilt package binaries
+packages/browser/bin/
 
 # Environment (contains API keys)
 .env

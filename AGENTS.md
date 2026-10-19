@@ -41,21 +41,12 @@ pigo/
 | `/help` | 帮助 |
 | `/quit` | 退出 |
 
-## 构建 / 测试（本机 受限运行环境 ⇄ build-host 交叉编译）
+## 构建 / 测试
 
-受限运行环境 上编译极慢且默认参数会被杀，**推荐在 build-host 上交叉编译**（一键脚本
-`./scripts/remote-build.sh`）：
-
-```sh
-sh ./scripts/remote-build.sh             # 构建 + 拉回 + 冒烟测试
-sh ./scripts/remote-build.sh --test      # 追加 go vet ./... + go test ./...
-sh ./scripts/remote-build.sh --install   # 追加原子安装（先备份）
-```
-
-- 目标 `linux/386`，必须用 **Go 1.22.12**——目标机自带的 1.23.0 编出的二进制在
-  受限运行环境 上会 SIGSYS（Go 1.23 启进程调 `pidfd_open`，受限运行环境 未实现）
-- `--test` 在 构建机上跑（原生 amd64，几秒出结果）；受限运行环境 上原生编译仅作后备
-- 细节、手动步骤与踩坑见全局 `~/.pigo/AGENTS.md`
+- 构建：`make build`（或 `go build -o pigo .`）
+- 测试：`make test`（或 `go test ./...`）
+- 交叉编译到 `linux/386` 等低资源目标时，注意 Go 版本与目标内核的兼容性
+  （例如 `pidfd_open` 等较新 syscall 在部分受限环境不可用）
 
 ## Packages / 扩展
 

@@ -4,14 +4,14 @@ A **pi-style package** (see `docs/packages.md`) providing Chrome-browser-like
 automation for coding agents. Zero third-party Go dependencies — the CDP
 client and WebSocket are implemented on the Go standard library.
 
-It follows the agent-baseline browser baseline: attach to a **persistent Chrome
+It follows the shared browser baseline: attach to a **persistent Chrome
 debug profile** on `localhost:9222` (`--remote-allow-origins=*` +
 `--user-data-dir="$HOME/.chrome-cdp-profile"`), serialize access with the
 shared flock at `/tmp/cdp-agent.lock`.
 
 This package is **independent of PiGo's core** — it does not modify the agent
 loop, tool registry, or CLI. It is a standalone capability an agent can invoke
-by reading `SKILL.md` and calling `bin/browser`.
+by reading `SKILL.md` and calling `bin/browser` (build it first with `make`).
 
 ## Layout
 
@@ -32,7 +32,7 @@ packages/browser/
 
 ```bash
 cd packages/browser
-make            # builds bin/browser
+make            # builds bin/browser (gitignored)
 make test       # go vet + go test ./...
 
 # As a pi package (pi reads package.json `pi` manifest):
@@ -69,7 +69,7 @@ Port overridable via `CDP_PORT` (default 9222).
   thin wrappers over JS, so any DOM capability is reachable without protocol
   surface growth.
 
-## Integration with agent-baseline
+## Integration with other agents
 
 Designed to interoperate with `automation/` (browser_use) and the
 chrome-devtools MCP:
@@ -77,7 +77,7 @@ chrome-devtools MCP:
 - Same Chrome baseline (`:9222`, `~/.chrome-cdp-profile`, `--remote-allow-origins=*`)
 - Same serialization lock (`/tmp/cdp-agent.lock`) — `browser lock -- ...`
   blocks until other agents are done, and other agents' flocks block this CLI
-- `browser doctor` surfaces the same launch hint as AGENT.md §11.1.1
+- `browser doctor` prints the same launch hint
 
 ## Security
 

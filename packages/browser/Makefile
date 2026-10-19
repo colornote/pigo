@@ -6,7 +6,7 @@ BIN := bin/browser
 all: build
 
 build:
-	cd cmd/browser && $(GO) build -o ../../$(BIN) .
+	cd cmd/browser && $(GO) build -trimpath -o ../../$(BIN) .
 
 test: vet
 	$(GO) test ./...

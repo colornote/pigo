@@ -7,10 +7,10 @@ description: Drive a persistent Chrome profile over CDP (localhost:9222) like a 
 
 A Chrome-browser-like capability package: a zero-dependency Go CLI that
 attaches to a **persistent Chrome debug profile** and lets the agent operate
-a real browser — exactly the pattern used by agent-baseline
+a real browser — exactly the pattern used by other agents
 (`automation/src/automation/core/browser.py`).
 
-## Prerequisites (agent-baseline AGENT.md §11.1.1 baseline)
+## Prerequisites (shared Chrome baseline)
 
 Chrome must be running with the debug profile:
 
@@ -30,7 +30,7 @@ Verify: `browser doctor` → `✓ Chrome CDP :9222 reachable`.
 > Chrome 403s every connection). Missing it → "Rejected an incoming WebSocket
 > connection".
 
-## CDP serialization (agent-baseline §11.1.2)
+## CDP serialization
 
 The shared profile must never be written concurrently — cookies/sessionStorage
 get corrupted and every platform logs out. Wrap multi-step browser sessions in
@@ -99,5 +99,5 @@ browser lock -- sh -c 'browser open ... && browser type ... && browser shot ...'
   `document.querySelector('iframe').contentDocument...`.
 - **SPA timing**: after navigation, wait before interacting:
   `browser wait 1500` or poll with `browser eval` until a selector exists.
-- **CAPTCHA / hard walls** (agent-baseline §10): keep the Chrome window visible
+- **CAPTCHA / hard walls** (agent baseline): keep the Chrome window visible
   and let a human complete the step, then continue.
